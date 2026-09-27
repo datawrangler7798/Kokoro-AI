@@ -1,43 +1,87 @@
 """
-Hybrid indexing support for Kokoro AI.
+Kokoro AI - Hybrid Retrieval Indexer.
 
-Responsibilities:
-- Maintain an in-memory BM25 keyword index.
-- Store searchable document chunks.
-- Tokenize text consistently for BM25.
-- Add/update/remove documents from the BM25 index.
-- Perform keyword retrieval.
-- Combine semantic and keyword candidates later.
+Responsibilities
+----------------
+- Maintain the BM25 lexical index.
+- Execute BM25 keyword retrieval.
+- Execute Pinecone semantic retrieval.
+- Normalize semantic and lexical scores.
+- Fuse scores using configurable weights.
+- Deduplicate results coming from both retrieval systems.
+- Return the initial hybrid retrieval pool.
 
-Important:
-    rank-bm25 is an in-memory library. Therefore the BM25 index
-    is rebuilt from the locally available indexed documents when
-    the application starts or when the index is explicitly rebuilt.
+Architecture
+------------
+                    Query
+                      |
+             +--------+--------+
+             |                 |
+             v                 v
+         Pinecone             BM25
+         Semantic            Keyword
+         Search              Search
+             |                 |
+             +--------+--------+
+                      |
+                Score Normalize
+                      |
+                Weighted Fusion
+                      |
+                 Hybrid Top-K
+                      |
+                  Reranker
 
-Pinecone remains the persistent semantic/vector store.
+Important
+---------
+This module does NOT:
+- classify the query
+- perform query decomposition
+- perform multi-query generation
+- call Gemini for reranking
+- generate the final answer
+- depend on Streamlit
 """
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
-from threading import RLock
-from typing import Any
+import json
+import math
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Mapping, Protocol, Sequence
 
-from langchain_core.documents import Document
-from rank_bm25 import BM25Okapi
+from utils.config import get_settings
+from utils.logger import get_logger
+from utils.schemas import RetrievalMethod, RetrievalResult
+from utils.utils import normalize_score
 
-from utils.logger import logger
-from utils.schemas import RetrievedChunk
+
+logger = get_logger(__name__)
+settings = get_settings()
 
 
 # ============================================================
-# BM25 Configuration
+# Protocols
 # ============================================================
 
-DEFAULT_BM25_K1 = 1.5
 
-DEFAULT_BM25_B = 0.75
+class SemanticRetriever(Protocol):
+    """
+    Interface required from the semantic vector store.
+
+    PineconeVectorStore satisfies this interface.
+    """
+
+    def similarity_search(
+        self,
+        query: str,
+        *,
+        top_k: int | None = None,
+        filters: Any | None = None,
+    ) -> list[RetrievalResult]:
+        ...
 
 
 # ============================================================
@@ -45,218 +89,235 @@ DEFAULT_BM25_B = 0.75
 # ============================================================
 
 
-@dataclass
+@dataclass(slots=True)
 class BM25Record:
     """
-    Internal representation of one BM25 indexed document chunk.
+    Internal representation of one indexed chunk.
+
+    The complete chunk text is retained because BM25 requires
+    the indexed corpus to build/query its lexical representation.
+    """
+
+    chunk_id: str
+    text: str
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+
+# ============================================================
+# Hybrid Result
+# ============================================================
+
+
+@dataclass(slots=True)
+class HybridSearchResult:
+    """
+    Internal hybrid retrieval result.
+
+    Scores:
+        semantic_score
+            Raw Pinecone similarity score.
+
+        keyword_score
+            Raw BM25 score.
+
+        normalized_semantic_score
+            Semantic score normalized to 0..1.
+
+        normalized_keyword_score
+            BM25 score normalized to 0..1.
+
+        hybrid_score
+            Weighted combination used for final hybrid ranking.
     """
 
     chunk_id: str
 
-    text: str
+    content: str
 
     metadata: dict[str, Any]
 
+    semantic_score: float = 0.0
 
-# ============================================================
-# Tokenization
-# ============================================================
+    keyword_score: float = 0.0
 
+    normalized_semantic_score: float = 0.0
 
-def tokenize_for_bm25(text: str) -> list[str]:
-    """
-    Tokenize text for BM25 retrieval.
+    normalized_keyword_score: float = 0.0
 
-    The tokenizer intentionally keeps useful technical
-    information such as:
+    hybrid_score: float = 0.0
 
-        Python
-        Python 3
-        SQL
-        C++
-        .NET
-        RAG
-        LLM
-        GCP
-        AWS
-
-    We do not perform aggressive stemming or stop-word removal.
-
-    Parameters
-    ----------
-    text:
-        Input text.
-
-    Returns
-    -------
-    list[str]
-        Tokens suitable for BM25.
-    """
-
-    if not text:
-        return []
-
-    text = text.lower()
-
-    # Keep:
-    # - letters
-    # - numbers
-    # - +, #, ., -, _
-    #
-    # This is useful for technical recruitment queries.
-    tokens = re.findall(
-        r"[a-z0-9][a-z0-9+#._-]*",
-        text,
+    retrieval_method: RetrievalMethod = (
+        RetrievalMethod.HYBRID
     )
 
-    return tokens
-
 
 # ============================================================
-# Hybrid Indexer
+# BM25 Backend
 # ============================================================
 
 
-class HybridIndexer:
+class BM25Backend:
     """
-    Manages the BM25 keyword index used by Kokoro.
+    Lightweight BM25 backend using rank-bm25.
 
-    This class does not directly communicate with Pinecone.
-    Pinecone semantic indexing is handled by PineconeVectorStore.
+    The backend owns:
+        - corpus records
+        - tokenized corpus
+        - BM25 model
 
-    The two indexes can therefore be updated independently.
+    It can be rebuilt whenever the indexed corpus changes.
+
+    This keeps BM25 implementation isolated from the hybrid
+    fusion logic.
     """
 
     def __init__(
         self,
-        k1: float = DEFAULT_BM25_K1,
-        b: float = DEFAULT_BM25_B,
+        *,
+        tokenizer: Any | None = None,
     ) -> None:
-        """
-        Initialize the BM25 indexer.
 
-        Parameters
-        ----------
-        k1:
-            BM25 term-frequency saturation parameter.
-
-        b:
-            BM25 document-length normalization parameter.
-        """
-
-        if k1 <= 0:
-            raise ValueError(
-                "BM25 k1 must be greater than 0."
-            )
-
-        if not 0 <= b <= 1:
-            raise ValueError(
-                "BM25 b must be between 0 and 1."
-            )
-
-        self.k1 = k1
-
-        self.b = b
-
-        self._records: dict[str, BM25Record] = {}
-
-        self._bm25: BM25Okapi | None = None
-
-        self._tokenized_corpus: list[list[str]] = []
-
-        self._record_order: list[str] = []
-
-        self._lock = RLock()
-
-    # ========================================================
-    # Properties
-    # ========================================================
-
-    @property
-    def size(self) -> int:
-        """
-        Return the number of indexed chunks.
-        """
-
-        with self._lock:
-            return len(self._records)
-
-    # ========================================================
-    # Add Documents
-    # ========================================================
-
-    def add_documents(
-        self,
-        documents: list[Document],
-    ) -> None:
-        """
-        Add or update LangChain Documents in the BM25 index.
-
-        Documents must contain:
-
-            metadata["chunk_id"]
-
-        Parameters
-        ----------
-        documents:
-            Chunked LangChain Documents.
-        """
-
-        if not documents:
-            return
-
-        with self._lock:
-
-            for document in documents:
-
-                chunk_id = document.metadata.get(
-                    "chunk_id"
-                )
-
-                if not chunk_id:
-                    raise ValueError(
-                        "Every document must contain "
-                        "metadata['chunk_id']."
-                    )
-
-                text = document.page_content.strip()
-
-                if not text:
-                    continue
-
-                self._records[str(chunk_id)] = BM25Record(
-                    chunk_id=str(chunk_id),
-                    text=text,
-                    metadata=dict(
-                        document.metadata
-                    ),
-                )
-
-            self._rebuild_locked()
-
-        logger.info(
-            "BM25 documents indexed | added=%d | total=%d",
-            len(documents),
-            self.size,
+        self._tokenizer = (
+            tokenizer
+            or self.default_tokenizer
         )
 
-    # ========================================================
-    # Add Raw Records
-    # ========================================================
+        self._records: dict[
+            str,
+            BM25Record,
+        ] = {}
 
-    def add_records(
-        self,
-        records: list[BM25Record],
-    ) -> None:
+        self._tokenized_corpus: list[
+            list[str]
+        ] = []
+
+        self._record_ids: list[str] = []
+
+        self._bm25: Any | None = None
+
+        self._lock = threading.RLock()
+
+    # --------------------------------------------------------
+    # Tokenization
+    # --------------------------------------------------------
+
+    @staticmethod
+    def default_tokenizer(
+        text: str,
+    ) -> list[str]:
         """
-        Add internal BM25 records.
+        Simple deterministic tokenizer.
 
-        Useful when restoring the index from persisted
-        application data.
+        BM25 does not require an LLM tokenizer.
+
+        The tokenizer:
+        - lowercases text
+        - keeps alphanumeric terms
+        - preserves useful technical tokens
+        """
+
+        if not text:
+            return []
+
+        normalized = text.lower()
+
+        tokens: list[str] = []
+
+        current: list[str] = []
+
+        for character in normalized:
+
+            if (
+                character.isalnum()
+                or character in (
+                    "_",
+                    "-",
+                    ".",
+                    "#",
+                    "+",
+                )
+            ):
+                current.append(
+                    character
+                )
+
+            else:
+                if current:
+                    tokens.append(
+                        "".join(current)
+                    )
+                    current = []
+
+        if current:
+            tokens.append(
+                "".join(current)
+            )
+
+        return [
+            token
+            for token in tokens
+            if token
+        ]
+
+    # --------------------------------------------------------
+    # Build
+    # --------------------------------------------------------
+
+    def _rebuild(self) -> None:
+        """Rebuild the BM25 model from the current records."""
+
+        with self._lock:
+
+            self._record_ids = list(
+                self._records.keys()
+            )
+
+            self._tokenized_corpus = [
+                self._tokenizer(
+                    self._records[
+                        record_id
+                    ].text
+                )
+                for record_id in self._record_ids
+            ]
+
+            if not self._tokenized_corpus:
+                self._bm25 = None
+                return
+
+            try:
+                from rank_bm25 import (
+                    BM25Okapi,
+                )
+            except ImportError as exc:
+                raise RuntimeError(
+                    "rank-bm25 is required for BM25 retrieval."
+                ) from exc
+
+            self._bm25 = BM25Okapi(
+                self._tokenized_corpus
+            )
+
+    # --------------------------------------------------------
+    # Upsert
+    # --------------------------------------------------------
+
+    def upsert(
+        self,
+        records: Sequence[BM25Record],
+    ) -> int:
+        """
+        Add or replace BM25 records.
+
+        chunk_id is the stable key, so repeated ingestion of
+        the same chunk does not create duplicate BM25 entries.
         """
 
         if not records:
-            return
+            return 0
 
         with self._lock:
 
@@ -264,7 +325,7 @@ class HybridIndexer:
 
                 if not record.chunk_id:
                     raise ValueError(
-                        "BM25 record chunk_id cannot be empty."
+                        "BM25 record requires chunk_id."
                     )
 
                 if not record.text.strip():
@@ -274,167 +335,149 @@ class HybridIndexer:
                     record.chunk_id
                 ] = record
 
-            self._rebuild_locked()
+            self._rebuild()
 
         logger.info(
-            "BM25 records restored | records=%d | total=%d",
-            len(records),
-            self.size,
+            "BM25 index updated: %d records.",
+            len(self._records),
         )
 
-    # ========================================================
-    # Remove Document
-    # ========================================================
+        return len(records)
 
-    def remove_document(
+    # --------------------------------------------------------
+    # Delete
+    # --------------------------------------------------------
+
+    def delete(
         self,
-        document_id: str,
+        chunk_ids: Sequence[str],
+    ) -> int:
+        """Delete BM25 records by chunk ID."""
+
+        if not chunk_ids:
+            return 0
+
+        deleted = 0
+
+        with self._lock:
+
+            for chunk_id in chunk_ids:
+
+                if (
+                    chunk_id
+                    in self._records
+                ):
+                    del self._records[
+                        chunk_id
+                    ]
+                    deleted += 1
+
+            if deleted:
+                self._rebuild()
+
+        return deleted
+
+    def delete_by_metadata(
+        self,
+        *,
+        document_id: str | None = None,
+        candidate_id: str | None = None,
+        jd_id: str | None = None,
     ) -> int:
         """
-        Remove all chunks belonging to a document.
-
-        Parameters
-        ----------
-        document_id:
-            Document identifier stored in metadata.
-
-        Returns
-        -------
-        int
-            Number of removed chunks.
+        Delete BM25 records matching document metadata.
         """
 
-        if not document_id.strip():
-            raise ValueError(
-                "document_id cannot be empty."
+        if not any(
+            (
+                document_id,
+                candidate_id,
+                jd_id,
             )
+        ):
+            return 0
+
+        matching_ids: list[str] = []
 
         with self._lock:
 
-            to_remove = [
-                chunk_id
-                for chunk_id, record in self._records.items()
-                if str(
-                    record.metadata.get(
-                        "document_id",
-                        "",
+            for chunk_id, record in (
+                self._records.items()
+            ):
+
+                metadata = record.metadata
+
+                if (
+                    document_id is not None
+                    and metadata.get(
+                        "document_id"
                     )
+                    != document_id
+                ):
+                    continue
+
+                if (
+                    candidate_id is not None
+                    and metadata.get(
+                        "candidate_id"
+                    )
+                    != candidate_id
+                ):
+                    continue
+
+                if (
+                    jd_id is not None
+                    and metadata.get(
+                        "jd_id"
+                    )
+                    != jd_id
+                ):
+                    continue
+
+                matching_ids.append(
+                    chunk_id
                 )
-                == document_id
-            ]
 
-            for chunk_id in to_remove:
-                del self._records[chunk_id]
-
-            self._rebuild_locked()
-
-        logger.info(
-            "BM25 document removed | "
-            "document_id=%s | chunks_removed=%d",
-            document_id,
-            len(to_remove),
-        )
-
-        return len(to_remove)
-
-    # ========================================================
-    # Rebuild
-    # ========================================================
-
-    def rebuild(self) -> None:
-        """
-        Explicitly rebuild the BM25 index.
-        """
-
-        with self._lock:
-            self._rebuild_locked()
-
-        logger.info(
-            "BM25 index rebuilt | documents=%d",
-            self.size,
-        )
-
-    def _rebuild_locked(self) -> None:
-        """
-        Rebuild BM25.
-
-        Caller must hold self._lock.
-        """
-
-        self._record_order = list(
-            self._records.keys()
-        )
-
-        self._tokenized_corpus = [
-            tokenize_for_bm25(
-                self._records[chunk_id].text
+            return self.delete(
+                matching_ids
             )
-            for chunk_id in self._record_order
-        ]
 
-        # rank-bm25 requires a corpus.
-        if not self._tokenized_corpus:
-            self._bm25 = None
-            return
-
-        self._bm25 = BM25Okapi(
-            self._tokenized_corpus,
-            k1=self.k1,
-            b=self.b,
-        )
-
-    # ========================================================
-    # Keyword Search
-    # ========================================================
+    # --------------------------------------------------------
+    # Search
+    # --------------------------------------------------------
 
     def search(
         self,
         query: str,
-        top_k: int = 5,
-        candidate_filter: dict[str, Any] | None = None,
-    ) -> list[RetrievedChunk]:
+        *,
+        top_k: int,
+        filters: Mapping[str, Any] | None = None,
+    ) -> list[tuple[BM25Record, float]]:
         """
-        Perform BM25 keyword retrieval.
+        Search BM25 and return:
 
-        Parameters
-        ----------
-        query:
-            Recruiter's search query.
+            [(record, raw_bm25_score), ...]
 
-        top_k:
-            Maximum number of results.
-
-        candidate_filter:
-            Optional metadata filter.
-
-        Returns
-        -------
-        list[RetrievedChunk]
-            BM25-ranked chunks.
+        Filtering is applied after scoring.
         """
 
-        query = query.strip()
-
-        if not query:
-            raise ValueError(
-                "query cannot be empty."
-            )
-
-        if top_k < 1:
-            raise ValueError(
-                "top_k must be >= 1."
-            )
-
-        query_tokens = tokenize_for_bm25(
-            query
-        )
-
-        if not query_tokens:
+        if (
+            not query
+            or not query.strip()
+            or top_k <= 0
+        ):
             return []
 
         with self._lock:
 
             if self._bm25 is None:
+                return []
+
+            query_tokens = self._tokenizer(
+                query
+            )
+
+            if not query_tokens:
                 return []
 
             scores = self._bm25.get_scores(
@@ -443,262 +486,1251 @@ class HybridIndexer:
 
             ranked_indexes = sorted(
                 range(len(scores)),
-                key=lambda index: scores[index],
+                key=lambda index: scores[
+                    index
+                ],
                 reverse=True,
             )
 
-            results: list[RetrievedChunk] = []
+            results: list[
+                tuple[
+                    BM25Record,
+                    float,
+                ]
+            ] = []
 
             for index in ranked_indexes:
-
-                if len(results) >= top_k:
-                    break
-
-                chunk_id = self._record_order[index]
-
-                record = self._records[
-                    chunk_id
-                ]
-
-                if not self._matches_filter(
-                    record.metadata,
-                    candidate_filter,
-                ):
-                    continue
 
                 score = float(
                     scores[index]
                 )
 
+                record_id = (
+                    self._record_ids[
+                        index
+                    ]
+                )
+
+                record = self._records[
+                    record_id
+                ]
+
+                if not self._matches_filters(
+                    record,
+                    filters,
+                ):
+                    continue
+
                 results.append(
-                    RetrievedChunk(
-                        chunk_id=record.chunk_id,
-                        candidate_id=self._optional_string(
-                            record.metadata.get(
-                                "candidate_id"
-                            )
-                        ),
-                        candidate_name=self._optional_string(
-                            record.metadata.get(
-                                "candidate_name"
-                            )
-                        ),
-                        text=record.text,
-                        keyword_score=score,
-                        metadata=dict(
-                            record.metadata
-                        ),
+                    (
+                        record,
+                        score,
                     )
                 )
 
+                if len(results) >= top_k:
+                    break
+
+            return results
+
+    # --------------------------------------------------------
+    # Filtering
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _matches_filters(
+        record: BM25Record,
+        filters: Mapping[str, Any] | None,
+    ) -> bool:
+        """
+        Apply application-level metadata filtering to BM25
+        results.
+
+        Pinecone handles metadata filtering natively. BM25 does
+        not, so the same logical filters are applied here.
+        """
+
+        if not filters:
+            return True
+
+        metadata = record.metadata
+
+        # --------------------------------------------
+        # Document type
+        # --------------------------------------------
+
+        document_type = filters.get(
+            "document_type"
+        )
+
+        if document_type is not None:
+
+            if hasattr(
+                document_type,
+                "value",
+            ):
+                document_type = (
+                    document_type.value
+                )
+
+            if isinstance(
+                document_type,
+                (
+                    list,
+                    tuple,
+                    set,
+                ),
+            ):
+                allowed = {
+                    str(value)
+                    for value in document_type
+                }
+
+                actual = str(
+                    metadata.get(
+                        "document_type",
+                        "",
+                    )
+                )
+
+                if actual not in allowed:
+                    return False
+
+            elif str(
+                metadata.get(
+                    "document_type",
+                    "",
+                )
+            ) != str(document_type):
+                return False
+
+        # --------------------------------------------
+        # Candidate ID
+        # --------------------------------------------
+
+        candidate_id = filters.get(
+            "candidate_id"
+        )
+
+        if (
+            candidate_id is not None
+            and metadata.get(
+                "candidate_id"
+            )
+            != candidate_id
+        ):
+            return False
+
+        candidate_ids = filters.get(
+            "candidate_ids"
+        )
+
+        if (
+            candidate_ids
+            and metadata.get(
+                "candidate_id"
+            )
+            not in candidate_ids
+        ):
+            return False
+
+        # --------------------------------------------
+        # JD ID
+        # --------------------------------------------
+
+        jd_id = filters.get(
+            "jd_id"
+        )
+
+        if (
+            jd_id is not None
+            and metadata.get(
+                "jd_id"
+            )
+            != jd_id
+        ):
+            return False
+
+        # --------------------------------------------
+        # Location
+        # --------------------------------------------
+
+        location = filters.get(
+            "location"
+        )
+
+        if (
+            location is not None
+            and str(
+                metadata.get(
+                    "location",
+                    "",
+                )
+            ).lower()
+            != str(location).lower()
+        ):
+            return False
+
+        # --------------------------------------------
+        # Experience
+        # --------------------------------------------
+
+        experience = metadata.get(
+            "experience_years"
+        )
+
+        min_experience = filters.get(
+            "min_experience"
+        )
+
+        if min_experience is not None:
+
+            if experience is None:
+                return False
+
+            try:
+                if float(experience) < float(
+                    min_experience
+                ):
+                    return False
+            except (
+                TypeError,
+                ValueError,
+            ):
+                return False
+
+        max_experience = filters.get(
+            "max_experience"
+        )
+
+        if max_experience is not None:
+
+            if experience is None:
+                return False
+
+            try:
+                if float(experience) > float(
+                    max_experience
+                ):
+                    return False
+            except (
+                TypeError,
+                ValueError,
+            ):
+                return False
+
+        # --------------------------------------------
+        # Skills
+        # --------------------------------------------
+
+        required_skills = filters.get(
+            "skills"
+        )
+
+        if required_skills:
+
+            indexed_skills = metadata.get(
+                "skills",
+                [],
+            )
+
+            if isinstance(
+                indexed_skills,
+                str,
+            ):
+                indexed_skills = [
+                    indexed_skills
+                ]
+
+            indexed_normalized = {
+                str(skill).lower()
+                for skill in indexed_skills
+            }
+
+            requested_normalized = {
+                str(skill).lower()
+                for skill in required_skills
+            }
+
+            if not requested_normalized.issubset(
+                indexed_normalized
+            ):
+                return False
+
+        return True
+
+    # --------------------------------------------------------
+    # Stats
+    # --------------------------------------------------------
+
+    def size(self) -> int:
+        """Return number of BM25 records."""
+
+        with self._lock:
+            return len(
+                self._records
+            )
+
+    def clear(self) -> None:
+        """Remove all BM25 records."""
+
+        with self._lock:
+
+            self._records.clear()
+
+            self._record_ids.clear()
+
+            self._tokenized_corpus.clear()
+
+            self._bm25 = None
+
+    # --------------------------------------------------------
+    # Persistence
+    # --------------------------------------------------------
+
+    def save(
+        self,
+        path: str | Path,
+    ) -> None:
+        """
+        Persist the BM25 corpus as JSON.
+
+        The BM25 model itself is rebuilt when loading rather
+        than serializing the rank-bm25 object.
+        """
+
+        destination = Path(path)
+
+        destination.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        with self._lock:
+
+            payload = {
+                "records": [
+                    {
+                        "chunk_id": record.chunk_id,
+                        "text": record.text,
+                        "metadata": record.metadata,
+                    }
+                    for record in self._records.values()
+                ]
+            }
+
+        destination.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
         logger.info(
-            "BM25 search completed | "
-            "top_k=%d | returned=%d",
-            top_k,
+            "Saved BM25 corpus: %s",
+            destination,
+        )
+
+    def load(
+        self,
+        path: str | Path,
+    ) -> int:
+        """Load a previously persisted BM25 corpus."""
+
+        source = Path(path)
+
+        if not source.exists():
+            return 0
+
+        payload = json.loads(
+            source.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        records = payload.get(
+            "records",
+            [],
+        )
+
+        loaded_records: list[
+            BM25Record
+        ] = []
+
+        for item in records:
+
+            if not isinstance(
+                item,
+                Mapping,
+            ):
+                continue
+
+            chunk_id = item.get(
+                "chunk_id"
+            )
+
+            text = item.get(
+                "text",
+                "",
+            )
+
+            if not chunk_id or not text:
+                continue
+
+            loaded_records.append(
+                BM25Record(
+                    chunk_id=str(
+                        chunk_id
+                    ),
+                    text=str(text),
+                    metadata=dict(
+                        item.get(
+                            "metadata",
+                            {},
+                        )
+                        or {}
+                    ),
+                )
+            )
+
+        self.upsert(
+            loaded_records
+        )
+
+        logger.info(
+            "Loaded BM25 corpus: %d records.",
+            len(loaded_records),
+        )
+
+        return len(loaded_records)
+
+
+# ============================================================
+# Hybrid Indexer
+# ============================================================
+
+
+class HybridIndexer:
+    """
+    Combines Pinecone semantic retrieval and BM25 lexical
+    retrieval.
+
+    Default fusion:
+
+        hybrid_score =
+            0.60 * normalized_semantic_score
+          + 0.40 * normalized_keyword_score
+
+    The final list is sorted by hybrid_score.
+    """
+
+    def __init__(
+        self,
+        *,
+        semantic_retriever: SemanticRetriever,
+        bm25_backend: BM25Backend | None = None,
+        semantic_weight: float | None = None,
+        keyword_weight: float | None = None,
+    ) -> None:
+
+        self.semantic_retriever = (
+            semantic_retriever
+        )
+
+        self.bm25 = (
+            bm25_backend
+            or BM25Backend()
+        )
+
+        self.semantic_weight = (
+            settings.SEMANTIC_WEIGHT
+            if semantic_weight is None
+            else semantic_weight
+        )
+
+        self.keyword_weight = (
+            settings.KEYWORD_WEIGHT
+            if keyword_weight is None
+            else keyword_weight
+        )
+
+        self._validate_weights()
+
+    # --------------------------------------------------------
+    # Validation
+    # --------------------------------------------------------
+
+    def _validate_weights(self) -> None:
+        """Validate hybrid fusion weights."""
+
+        if not (
+            0.0
+            <= self.semantic_weight
+            <= 1.0
+        ):
+            raise ValueError(
+                "semantic_weight must be between 0 and 1."
+            )
+
+        if not (
+            0.0
+            <= self.keyword_weight
+            <= 1.0
+        ):
+            raise ValueError(
+                "keyword_weight must be between 0 and 1."
+            )
+
+        total = (
+            self.semantic_weight
+            + self.keyword_weight
+        )
+
+        if not math.isclose(
+            total,
+            1.0,
+            abs_tol=1e-6,
+        ):
+            raise ValueError(
+                "semantic_weight + keyword_weight "
+                "must equal 1.0."
+            )
+
+    # --------------------------------------------------------
+    # BM25 Indexing
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _extract_value(
+        obj: Any,
+        key: str,
+        default: Any = None,
+    ) -> Any:
+
+        if isinstance(
+            obj,
+            Mapping,
+        ):
+            return obj.get(
+                key,
+                default,
+            )
+
+        return getattr(
+            obj,
+            key,
+            default,
+        )
+
+    @classmethod
+    def _chunk_to_bm25_record(
+        cls,
+        chunk: Any,
+    ) -> BM25Record:
+        """Convert an ingestion chunk into a BM25 record."""
+
+        chunk_id = (
+            cls._extract_value(
+                chunk,
+                "chunk_id",
+            )
+            or cls._extract_value(
+                chunk,
+                "id",
+            )
+        )
+
+        if not chunk_id:
+            raise ValueError(
+                "Chunk requires chunk_id for BM25 indexing."
+            )
+
+        text = (
+            cls._extract_value(
+                chunk,
+                "content",
+            )
+            or cls._extract_value(
+                chunk,
+                "text",
+            )
+            or ""
+        )
+
+        if not text.strip():
+            raise ValueError(
+                f"Chunk {chunk_id} has empty text."
+            )
+
+        metadata = (
+            cls._extract_value(
+                chunk,
+                "metadata",
+                {},
+            )
+            or {}
+        )
+
+        if hasattr(
+            metadata,
+            "model_dump",
+        ):
+            metadata = metadata.model_dump()
+
+        metadata = dict(
+            metadata
+        )
+
+        # Keep important retrieval metadata available
+        # even when it was supplied as top-level fields.
+        for key in (
+            "document_id",
+            "candidate_id",
+            "jd_id",
+            "document_type",
+            "candidate_name",
+            "location",
+            "experience_years",
+            "skills",
+            "section",
+            "page",
+        ):
+
+            value = cls._extract_value(
+                chunk,
+                key,
+            )
+
+            if value is not None:
+                metadata.setdefault(
+                    key,
+                    value,
+                )
+
+        return BM25Record(
+            chunk_id=str(
+                chunk_id
+            ),
+            text=str(text),
+            metadata=metadata,
+        )
+
+    def index_chunks(
+        self,
+        chunks: Sequence[Any],
+    ) -> int:
+        """
+        Add chunks to BM25.
+
+        Pinecone indexing is handled by vector_store.py.
+        """
+
+        records = [
+            self._chunk_to_bm25_record(
+                chunk
+            )
+            for chunk in chunks
+        ]
+
+        return self.bm25.upsert(
+            records
+        )
+
+    # --------------------------------------------------------
+    # Score Normalization
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _normalize_scores(
+        scores: Mapping[str, float],
+    ) -> dict[str, float]:
+        """
+        Normalize scores to 0..1.
+
+        The normalization is performed independently for each
+        retrieval source because Pinecone similarity and BM25
+        scores are not directly comparable.
+        """
+
+        if not scores:
+            return {}
+
+        values = [
+            float(value)
+            for value in scores.values()
+        ]
+
+        minimum = min(values)
+        maximum = max(values)
+
+        if math.isclose(
+            minimum,
+            maximum,
+            abs_tol=1e-12,
+        ):
+            # If every candidate has the same score, preserve
+            # the fact that the candidates were retrieved while
+            # avoiding arbitrary differentiation.
+            return {
+                key: (
+                    1.0
+                    if value > 0
+                    else 0.0
+                )
+                for key, value in scores.items()
+            }
+
+        return {
+            key: (
+                float(value) - minimum
+            )
+            / (
+                maximum - minimum
+            )
+            for key, value in scores.items()
+        }
+
+    # --------------------------------------------------------
+    # Metadata Filtering
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _filters_to_mapping(
+        filters: Any | None,
+    ) -> dict[str, Any] | None:
+        """Convert SearchFilters/Pydantic model to a mapping."""
+
+        if filters is None:
+            return None
+
+        if hasattr(
+            filters,
+            "model_dump",
+        ):
+            return filters.model_dump(
+                exclude_none=True
+            )
+
+        if isinstance(
+            filters,
+            Mapping,
+        ):
+            return dict(filters)
+
+        return {
+            key: value
+            for key, value in vars(
+                filters
+            ).items()
+            if value is not None
+        }
+
+    # --------------------------------------------------------
+    # Fusion
+    # --------------------------------------------------------
+
+    def _fuse_results(
+        self,
+        semantic_results: Sequence[
+            RetrievalResult
+        ],
+        keyword_results: Sequence[
+            tuple[BM25Record, float]
+        ],
+        *,
+        top_k: int,
+    ) -> list[HybridSearchResult]:
+        """
+        Merge semantic and keyword results by chunk_id.
+        """
+
+        semantic_scores: dict[
+            str,
+            float,
+        ] = {}
+
+        semantic_objects: dict[
+            str,
+            RetrievalResult,
+        ] = {}
+
+        for result in semantic_results:
+
+            chunk_id = (
+                self._extract_value(
+                    result,
+                    "chunk_id",
+                )
+            )
+
+            if not chunk_id:
+                continue
+
+            chunk_id = str(
+                chunk_id
+            )
+
+            score = float(
+                self._extract_value(
+                    result,
+                    "score",
+                    0.0,
+                )
+                or 0.0
+            )
+
+            semantic_scores[
+                chunk_id
+            ] = score
+
+            semantic_objects[
+                chunk_id
+            ] = result
+
+        keyword_scores: dict[
+            str,
+            float,
+        ] = {}
+
+        keyword_objects: dict[
+            str,
+            BM25Record,
+        ] = {}
+
+        for record, score in keyword_results:
+
+            chunk_id = str(
+                record.chunk_id
+            )
+
+            keyword_scores[
+                chunk_id
+            ] = float(score)
+
+            keyword_objects[
+                chunk_id
+            ] = record
+
+        normalized_semantic = (
+            self._normalize_scores(
+                semantic_scores
+            )
+        )
+
+        normalized_keyword = (
+            self._normalize_scores(
+                keyword_scores
+            )
+        )
+
+        all_chunk_ids = set(
+            semantic_scores
+        ) | set(
+            keyword_scores
+        )
+
+        fused: list[
+            HybridSearchResult
+        ] = []
+
+        for chunk_id in all_chunk_ids:
+
+            semantic_score = (
+                semantic_scores.get(
+                    chunk_id,
+                    0.0,
+                )
+            )
+
+            keyword_score = (
+                keyword_scores.get(
+                    chunk_id,
+                    0.0,
+                )
+            )
+
+            normalized_semantic_score = (
+                normalized_semantic.get(
+                    chunk_id,
+                    0.0,
+                )
+            )
+
+            normalized_keyword_score = (
+                normalized_keyword.get(
+                    chunk_id,
+                    0.0,
+                )
+            )
+
+            hybrid_score = (
+                self.semantic_weight
+                * normalized_semantic_score
+                + self.keyword_weight
+                * normalized_keyword_score
+            )
+
+            semantic_result = (
+                semantic_objects.get(
+                    chunk_id
+                )
+            )
+
+            keyword_record = (
+                keyword_objects.get(
+                    chunk_id
+                )
+            )
+
+            content = ""
+
+            metadata: dict[
+                str,
+                Any,
+            ] = {}
+
+            if semantic_result is not None:
+
+                content = (
+                    self._extract_value(
+                        semantic_result,
+                        "content",
+                        "",
+                    )
+                    or ""
+                )
+
+                result_metadata = (
+                    self._extract_value(
+                        semantic_result,
+                        "metadata",
+                        {},
+                    )
+                    or {}
+                )
+
+                if hasattr(
+                    result_metadata,
+                    "model_dump",
+                ):
+                    result_metadata = (
+                        result_metadata.model_dump()
+                    )
+
+                metadata.update(
+                    dict(
+                        result_metadata
+                    )
+                )
+
+            if keyword_record is not None:
+
+                if not content:
+                    content = (
+                        keyword_record.text
+                    )
+
+                # Semantic metadata remains primary.
+                # BM25 fills in anything missing.
+                for key, value in (
+                    keyword_record.metadata.items()
+                ):
+                    metadata.setdefault(
+                        key,
+                        value,
+                    )
+
+            fused.append(
+                HybridSearchResult(
+                    chunk_id=chunk_id,
+                    content=content,
+                    metadata=metadata,
+                    semantic_score=semantic_score,
+                    keyword_score=keyword_score,
+                    normalized_semantic_score=(
+                        normalized_semantic_score
+                    ),
+                    normalized_keyword_score=(
+                        normalized_keyword_score
+                    ),
+                    hybrid_score=hybrid_score,
+                )
+            )
+
+        fused.sort(
+            key=lambda result: (
+                result.hybrid_score,
+                result.semantic_score,
+                result.keyword_score,
+            ),
+            reverse=True,
+        )
+
+        return fused[
+            :top_k
+        ]
+
+    # --------------------------------------------------------
+    # Hybrid Search
+    # --------------------------------------------------------
+
+    def search(
+        self,
+        query: str,
+        *,
+        top_k: int | None = None,
+        semantic_top_k: int | None = None,
+        keyword_top_k: int | None = None,
+        filters: Any | None = None,
+    ) -> list[HybridSearchResult]:
+        """
+        Execute hybrid retrieval.
+
+        Flow:
+
+            Query
+              |
+              +----> Pinecone semantic retrieval
+              |
+              +----> BM25 lexical retrieval
+              |
+              v
+         Normalize scores
+              |
+              v
+         Weighted fusion
+              |
+              v
+          Hybrid Top-K
+        """
+
+        if not query or not query.strip():
+            return []
+
+        final_top_k = (
+            top_k
+            if top_k is not None
+            else getattr(
+                settings,
+                "HYBRID_TOP_K",
+                settings.RETRIEVAL_TOP_K,
+            )
+        )
+
+        semantic_k = (
+            semantic_top_k
+            if semantic_top_k is not None
+            else getattr(
+                settings,
+                "VECTOR_TOP_K",
+                final_top_k,
+            )
+        )
+
+        keyword_k = (
+            keyword_top_k
+            if keyword_top_k is not None
+            else getattr(
+                settings,
+                "BM25_TOP_K",
+                final_top_k,
+            )
+        )
+
+        if final_top_k <= 0:
+            raise ValueError(
+                "top_k must be greater than zero."
+            )
+
+        filter_mapping = (
+            self._filters_to_mapping(
+                filters
+            )
+        )
+
+        logger.info(
+            "Starting hybrid search: top_k=%d semantic_k=%d keyword_k=%d",
+            final_top_k,
+            semantic_k,
+            keyword_k,
+        )
+
+        # ----------------------------------------------------
+        # Semantic retrieval
+        # ----------------------------------------------------
+
+        semantic_results = (
+            self.semantic_retriever.similarity_search(
+                query,
+                top_k=semantic_k,
+                filters=filters,
+            )
+        )
+
+        # ----------------------------------------------------
+        # Keyword retrieval
+        # ----------------------------------------------------
+
+        keyword_results = (
+            self.bm25.search(
+                query,
+                top_k=keyword_k,
+                filters=filter_mapping,
+            )
+        )
+
+        # ----------------------------------------------------
+        # Fusion
+        # ----------------------------------------------------
+
+        results = self._fuse_results(
+            semantic_results,
+            keyword_results,
+            top_k=final_top_k,
+        )
+
+        logger.info(
+            "Hybrid search completed: "
+            "semantic=%d keyword=%d final=%d",
+            len(semantic_results),
+            len(keyword_results),
             len(results),
         )
 
         return results
 
-    # ========================================================
-    # Retrieve Record
-    # ========================================================
+    # --------------------------------------------------------
+    # Deletion
+    # --------------------------------------------------------
 
-    def get_record(
+    def delete_by_document_id(
         self,
-        chunk_id: str,
-    ) -> BM25Record | None:
-        """
-        Retrieve an indexed BM25 record by chunk ID.
-        """
+        document_id: str,
+    ) -> int:
+        """Remove a document from the BM25 index."""
 
-        with self._lock:
-            return self._records.get(
-                chunk_id
-            )
-
-    # ========================================================
-    # Export Records
-    # ========================================================
-
-    def export_records(self) -> list[BM25Record]:
-        """
-        Export indexed records.
-
-        This can later be used to persist BM25 source data
-        and rebuild the in-memory index after application restart.
-        """
-
-        with self._lock:
-            return list(
-                self._records.values()
-            )
-
-    # ========================================================
-    # Metadata Filtering
-    # ========================================================
-
-    @staticmethod
-    def _matches_filter(
-        metadata: dict[str, Any],
-        candidate_filter: dict[str, Any] | None,
-    ) -> bool:
-        """
-        Apply a simple equality-based metadata filter.
-
-        Example:
-
-            {
-                "document_type": "resume"
-            }
-
-        or:
-
-            {
-                "candidate_id": "candidate_001"
-            }
-
-        This is intentionally simple because more complex
-        filtering can be implemented at the retrieval-router
-        layer.
-        """
-
-        if not candidate_filter:
-            return True
-
-        for key, expected_value in candidate_filter.items():
-
-            actual_value = metadata.get(
-                key
-            )
-
-            if actual_value != expected_value:
-                return False
-
-        return True
-
-    # ========================================================
-    # Utility
-    # ========================================================
-
-    @staticmethod
-    def _optional_string(
-        value: Any,
-    ) -> str | None:
-        """
-        Convert optional metadata to a clean string.
-        """
-
-        if value is None:
-            return None
-
-        value = str(value).strip()
-
-        return value or None
-
-
-# ============================================================
-# Hybrid Score Normalization
-# ============================================================
-
-
-def normalize_scores(
-    results: list[RetrievedChunk],
-    score_type: str,
-) -> list[RetrievedChunk]:
-    """
-    Normalize retrieval scores to the range [0, 1].
-
-    This is useful before combining Pinecone semantic scores
-    with BM25 keyword scores because their raw score scales
-    are different.
-
-    Parameters
-    ----------
-    results:
-        Retrieved chunks.
-
-    score_type:
-        Either:
-            "semantic"
-            "keyword"
-
-    Returns
-    -------
-    list[RetrievedChunk]
-        Results with normalized scores.
-
-    Notes
-    -----
-    Min-max normalization is used here:
-
-        normalized =
-            (score - min_score) /
-            (max_score - min_score)
-
-    If all scores are identical, each score becomes 1.0.
-    """
-
-    if score_type not in {
-        "semantic",
-        "keyword",
-    }:
-        raise ValueError(
-            "score_type must be 'semantic' or 'keyword'."
+        return self.bm25.delete_by_metadata(
+            document_id=document_id
         )
 
-    if not results:
-        return []
+    def delete_by_candidate_id(
+        self,
+        candidate_id: str,
+    ) -> int:
+        """Remove candidate chunks from BM25."""
 
-    scores: list[float] = []
+        return self.bm25.delete_by_metadata(
+            candidate_id=candidate_id
+        )
 
-    for result in results:
+    def delete_by_jd_id(
+        self,
+        jd_id: str,
+    ) -> int:
+        """Remove JD chunks from BM25."""
 
-        if score_type == "semantic":
-            score = result.semantic_score
-        else:
-            score = result.keyword_score
+        return self.bm25.delete_by_metadata(
+            jd_id=jd_id
+        )
 
-        if score is not None:
-            scores.append(
-                float(score)
+    # --------------------------------------------------------
+    # Persistence
+    # --------------------------------------------------------
+
+    def save_bm25(
+        self,
+        path: str | Path | None = None,
+    ) -> None:
+        """
+        Persist the BM25 corpus.
+
+        If no path is provided, use the configured BM25
+        directory.
+        """
+
+        if path is None:
+
+            directory = Path(
+                getattr(
+                    settings,
+                    "BM25_DIRECTORY",
+                    "data/bm25",
+                )
             )
 
-    if not scores:
-        return results
+            path = (
+                directory
+                / "bm25_index.json"
+            )
 
-    min_score = min(scores)
+        self.bm25.save(
+            path
+        )
 
-    max_score = max(scores)
+    def load_bm25(
+        self,
+        path: str | Path | None = None,
+    ) -> int:
+        """Load the persisted BM25 corpus."""
 
-    score_range = max_score - min_score
+        if path is None:
 
-    for result in results:
+            directory = Path(
+                getattr(
+                    settings,
+                    "BM25_DIRECTORY",
+                    "data/bm25",
+                )
+            )
 
-        if score_type == "semantic":
+            path = (
+                directory
+                / "bm25_index.json"
+            )
 
-            if result.semantic_score is None:
-                continue
+        return self.bm25.load(
+            path
+        )
 
-            if score_range == 0:
-                result.semantic_score = 1.0
+    # --------------------------------------------------------
+    # Stats
+    # --------------------------------------------------------
 
-            else:
-                result.semantic_score = (
-                    result.semantic_score - min_score
-                ) / score_range
+    def bm25_size(self) -> int:
+        """Return number of chunks currently indexed by BM25."""
 
-        else:
+        return self.bm25.size()
 
-            if result.keyword_score is None:
-                continue
 
-            if score_range == 0:
-                result.keyword_score = 1.0
+# ============================================================
+# Factory
+# ============================================================
 
-            else:
-                result.keyword_score = (
-                    result.keyword_score - min_score
-                ) / score_range
 
-    return results
+def create_hybrid_indexer(
+    *,
+    semantic_retriever: SemanticRetriever,
+    bm25_backend: BM25Backend | None = None,
+) -> HybridIndexer:
+    """
+    Create the application hybrid indexer.
+
+    Dependencies are injectable so unit tests can use mocked
+    Pinecone/embedding components without external services.
+    """
+
+    return HybridIndexer(
+        semantic_retriever=semantic_retriever,
+        bm25_backend=bm25_backend,
+    )
+
+
+__all__ = [
+    "SemanticRetriever",
+    "BM25Record",
+    "BM25Backend",
+    "HybridSearchResult",
+    "HybridIndexer",
+    "create_hybrid_indexer",
+]

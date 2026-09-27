@@ -1,626 +1,1049 @@
 """
-Document ingestion orchestration for Kokoro AI.
+core/ingestion/ingestion.py
+
+Kokoro document ingestion orchestration.
 
 Responsibilities:
-- Validate uploaded PDF
-- Calculate SHA-256 document hash
-- Detect duplicate documents
-- Save source PDF locally
-- Parse and chunk the document
-- Prepare the ingestion result for indexing
+    - Validate PDF files.
+    - Calculate SHA-256 document hashes.
+    - Detect duplicate documents.
+    - Save PDFs into the local data directory.
+    - Parse PDFs.
+    - Create section-aware LangChain Documents.
+    - Split documents into retrieval chunks.
+    - Prepare chunks for embedding/indexing.
+    - Coordinate Pinecone and BM25 indexing through injectable services.
+    - Support single and batch ingestion.
+    - Report individual document failures.
+    - Log ingestion progress and errors.
 
-This module intentionally does not implement:
-- Embedding generation
-- Pinecone operations
-- BM25 indexing
+Important:
+    This module orchestrates ingestion.
 
-Those responsibilities belong to the retrieval/indexing layer.
+    It does NOT contain:
+        - Pinecone implementation
+        - BM25 implementation
+        - Gemini implementation
+        - Streamlit UI code
+
+Those components are kept replaceable.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import shutil
 from pathlib import Path
-from typing import Literal
-from uuid import uuid4
+from typing import Any, Callable, Optional, Protocol
 
-from langchain_core.documents import Document
+from langchain_core.documents import Document as LangChainDocument
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from core.ingestion.parsing import parse_pdf
-from utils.logger import logger
-from utils.utils import calculate_sha256
+from core.ingestion.parsing import (
+    ParsedDocument,
+    parse_pdf,
+    to_langchain_documents,
+)
+
+from utils.config import settings
+from utils.logger import get_logger
+from utils.schemas import (
+    DocumentType,
+    IngestionStatus,
+)
+from utils.utils import (
+    calculate_file_hash,
+    get_file_extension,
+    get_file_size_bytes,
+    sanitize_filename,
+    validate_file_size,
+)
 
 
 # ============================================================
-# Constants
+# LOGGER
 # ============================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-DATA_DIR = PROJECT_ROOT / "data"
-
-RESUME_DIR = DATA_DIR / "resumes"
-
-JD_DIR = DATA_DIR / "jds"
-
-DocumentType = Literal["resume", "jd"]
+logger = get_logger(__name__)
 
 
 # ============================================================
-# Result Schema
+# SERVICE PROTOCOLS
 # ============================================================
 
 
-@dataclass
-class IngestionResult:
+class VectorStoreProtocol(Protocol):
     """
-    Result returned after successful document ingestion.
+    Interface expected from the future Pinecone vector-store
+    implementation.
 
-    Attributes
-    ----------
-    document_id:
-        Unique ID assigned to the uploaded document.
-
-    document_type:
-        Either "resume" or "jd".
-
-    source_file:
-        Original filename.
-
-    stored_path:
-        Local path where the original PDF was stored.
-
-    document_hash:
-        SHA-256 hash of the original PDF.
-
-    chunks:
-        Parsed and chunked LangChain Documents.
-
-    is_duplicate:
-        Whether the uploaded document was already present.
+    vector_store.py will implement this interface.
     """
 
-    document_id: str
+    def index_documents(
+        self,
+        documents: list[LangChainDocument],
+    ) -> Any:
+        ...
 
-    document_type: DocumentType
 
-    source_file: str
+class HybridIndexerProtocol(Protocol):
+    """
+    Interface expected from the future hybrid/BM25 indexer.
 
-    stored_path: Path
+    hybrid_indexer.py will implement this interface.
+    """
 
-    document_hash: str
+    def add_documents(
+        self,
+        documents: list[LangChainDocument],
+    ) -> Any:
+        ...
 
-    chunks: list[Document]
 
-    is_duplicate: bool = False
+class RegistryProtocol(Protocol):
+    """
+    Optional document registry interface.
+
+    A registry implementation can persist ingestion state.
+    """
+
+    def exists(
+        self,
+        document_hash: str,
+    ) -> bool:
+        ...
+
+    def save(
+        self,
+        document: ParsedDocument,
+    ) -> Any:
+        ...
 
 
 # ============================================================
-# Directory Helpers
+# INGESTION SERVICE
 # ============================================================
 
 
-def _get_storage_directory(
-    document_type: DocumentType,
-) -> Path:
+class IngestionService:
     """
-    Return the local storage directory for a document type.
-    """
+    Main Kokoro ingestion service.
 
-    if document_type == "resume":
-        directory = RESUME_DIR
+    The service is deliberately dependency-injected so that
+    Pinecone, BM25 and registry implementations can be changed
+    without rewriting the ingestion pipeline.
 
-    elif document_type == "jd":
-        directory = JD_DIR
+    Example:
 
-    else:
-        raise ValueError(
-            f"Unsupported document type: {document_type}"
+        service = IngestionService(
+            vector_store=vector_store,
+            hybrid_indexer=hybrid_indexer,
         )
 
-    directory.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    return directory
-
-
-# ============================================================
-# Filename Validation
-# ============================================================
-
-
-def _validate_filename(
-    filename: str,
-) -> str:
-    """
-    Validate and sanitize an uploaded filename.
-
-    Only the filename itself is retained; directory traversal
-    components are discarded.
+        result = service.ingest_file(
+            "data/resumes/Angela_Lewis.pdf"
+        )
     """
 
-    if not filename or not filename.strip():
-        raise ValueError(
-            "Filename cannot be empty."
+    def __init__(
+        self,
+        vector_store: Optional[
+            VectorStoreProtocol
+        ] = None,
+        hybrid_indexer: Optional[
+            HybridIndexerProtocol
+        ] = None,
+        registry: Optional[
+            RegistryProtocol
+        ] = None,
+    ) -> None:
+
+        self.vector_store = vector_store
+        self.hybrid_indexer = hybrid_indexer
+        self.registry = registry
+
+        self._splitter = (
+            RecursiveCharacterTextSplitter(
+                chunk_size=settings.CHUNK_SIZE,
+                chunk_overlap=settings.CHUNK_OVERLAP,
+                length_function=len,
+                add_start_index=True,
+            )
         )
 
-    safe_name = Path(
-        filename.strip()
-    ).name
+    # ========================================================
+    # VALIDATION
+    # ========================================================
 
-    if not safe_name:
-        raise ValueError(
-            "Invalid filename."
+    def validate_file(
+        self,
+        file_path: str | Path,
+    ) -> None:
+        """
+        Validate a file before ingestion.
+
+        Checks:
+            - file exists
+            - file is a regular file
+            - extension is allowed
+            - file size is within configured limit
+        """
+
+        path = Path(file_path)
+
+        if not path.exists():
+            raise FileNotFoundError(
+                f"File does not exist: {path}"
+            )
+
+        if not path.is_file():
+            raise ValueError(
+                f"Path is not a file: {path}"
+            )
+
+        extension = get_file_extension(
+            path
+        ).lower()
+
+        allowed_extensions = (
+            settings.get_allowed_extensions()
         )
 
-    if Path(safe_name).suffix.lower() != ".pdf":
-        raise ValueError(
-            "Only PDF files are supported."
+        if extension not in allowed_extensions:
+
+            raise ValueError(
+                f"Unsupported file extension "
+                f"'{extension}'. "
+                f"Allowed: {allowed_extensions}"
+            )
+
+        file_size = get_file_size_bytes(
+            path
         )
 
-    return safe_name
+        validate_file_size(
+            file_size,
+            settings.MAX_FILE_SIZE_MB,
+        )
 
+    # ========================================================
+    # HASH
+    # ========================================================
 
-# ============================================================
-# Duplicate Detection
-# ============================================================
+    def calculate_hash(
+        self,
+        file_path: str | Path,
+    ) -> str:
+        """
+        Calculate SHA-256 hash for duplicate detection.
+        """
 
+        return calculate_file_hash(
+            file_path
+        )
 
-def _find_existing_document_by_hash(
-    storage_directory: Path,
-    document_hash: str,
-) -> Path | None:
-    """
-    Search locally stored PDFs for a matching SHA-256 hash.
+    # ========================================================
+    # DUPLICATE CHECK
+    # ========================================================
 
-    This is intentionally implemented as a local filesystem
-    check for the current Kokoro development architecture.
+    def is_duplicate(
+        self,
+        document_hash: str,
+    ) -> bool:
+        """
+        Determine whether a document has already been
+        ingested.
 
-    For a larger production deployment, this lookup can later
-    be replaced by a persistent document registry without
-    changing the parsing layer.
-    """
+        If a registry is configured, use it.
 
-    if not storage_directory.exists():
-        return None
+        Otherwise, the caller can use the hash to perform
+        duplicate detection externally.
+        """
 
-    for pdf_path in storage_directory.glob("*.pdf"):
+        if self.registry is None:
+            return False
 
         try:
-            existing_bytes = pdf_path.read_bytes()
 
-            existing_hash = calculate_sha256(
-                existing_bytes
+            return bool(
+                self.registry.exists(
+                    document_hash
+                )
             )
 
-            if existing_hash == document_hash:
-                return pdf_path
+        except Exception:
 
-        except OSError:
-            # A single unreadable file should not prevent
-            # ingestion of a new document.
-            logger.warning(
-                "Unable to inspect existing file during "
-                "duplicate check | file=%s",
-                pdf_path.name,
+            logger.exception(
+                "Document registry duplicate check failed."
             )
 
-    return None
+            raise
 
+    # ========================================================
+    # SAVE FILE
+    # ========================================================
 
-# ============================================================
-# Local Document Storage
-# ============================================================
+    def get_storage_directory(
+        self,
+        document_type: DocumentType,
+    ) -> Path:
+        """
+        Return the local storage directory for the document.
+        """
 
+        if document_type == DocumentType.RESUME:
+            return Path(
+                settings.RESUMES_DIRECTORY
+            )
 
-def _save_pdf(
-    pdf_data: bytes,
-    storage_directory: Path,
-    filename: str,
-) -> Path:
-    """
-    Save the original PDF to local storage.
-
-    A unique prefix is added to avoid accidental overwriting
-    of files having the same filename.
-    """
-
-    unique_prefix = uuid4().hex[:12]
-
-    stored_filename = (
-        f"{unique_prefix}_{filename}"
-    )
-
-    output_path = (
-        storage_directory / stored_filename
-    )
-
-    try:
-        output_path.write_bytes(
-            pdf_data
+        return Path(
+            settings.JDS_DIRECTORY
         )
 
-    except OSError as exc:
-        raise RuntimeError(
-            f"Unable to save PDF: {filename}"
-        ) from exc
+    def save_file(
+        self,
+        source_path: str | Path,
+        document_type: DocumentType,
+    ) -> Path:
+        """
+        Save a PDF into the configured local document
+        directory.
 
-    return output_path
+        Existing files with the same name are overwritten only
+        when they represent the same ingestion operation.
+        """
 
+        source = Path(source_path)
 
-# ============================================================
-# Candidate Metadata
-# ============================================================
-
-
-def _validate_document_type(
-    document_type: str,
-) -> DocumentType:
-    """
-    Validate the supported document type.
-    """
-
-    normalized = document_type.strip().lower()
-
-    if normalized not in {"resume", "jd"}:
-        raise ValueError(
-            "document_type must be either 'resume' or 'jd'."
+        storage_directory = (
+            self.get_storage_directory(
+                document_type
+            )
         )
 
-    return normalized  # type: ignore[return-value]
-
-
-# ============================================================
-# Main Ingestion Function
-# ============================================================
-
-
-def ingest_document(
-    pdf_data: bytes,
-    filename: str,
-    document_type: DocumentType,
-    candidate_id: str | None = None,
-    candidate_name: str | None = None,
-    document_id: str | None = None,
-    chunk_size: int = 800,
-    chunk_overlap: int = 120,
-) -> IngestionResult:
-    """
-    Ingest a single resume or JD PDF.
-
-    Complete flow:
-
-        PDF bytes
-            ↓
-        Filename validation
-            ↓
-        SHA-256 hash
-            ↓
-        Duplicate check
-            ↓
-        Local storage
-            ↓
-        PDF parsing
-            ↓
-        Text preprocessing
-            ↓
-        LangChain Document
-            ↓
-        Chunking
-            ↓
-        IngestionResult
-
-    Parameters
-    ----------
-    pdf_data:
-        Raw PDF bytes.
-
-    filename:
-        Original PDF filename.
-
-    document_type:
-        "resume" or "jd".
-
-    candidate_id:
-        Optional candidate identifier.
-        Normally provided for resumes.
-
-    candidate_name:
-        Optional candidate name.
-
-    document_id:
-        Optional externally supplied document ID.
-        If omitted, one is generated.
-
-    chunk_size:
-        Target chunk size.
-
-    chunk_overlap:
-        Chunk overlap.
-
-    Returns
-    -------
-    IngestionResult
-        Parsed and chunked document information.
-
-    Raises
-    ------
-    ValueError
-        For invalid input or duplicate documents.
-
-    RuntimeError
-        For storage failures.
-    """
-
-    # --------------------------------------------------------
-    # Validate basic inputs
-    # --------------------------------------------------------
-
-    if not pdf_data:
-        raise ValueError(
-            "PDF data cannot be empty."
+        storage_directory.mkdir(
+            parents=True,
+            exist_ok=True,
         )
 
-    safe_filename = _validate_filename(
-        filename
-    )
+        safe_filename = sanitize_filename(
+            source.name
+        )
 
-    validated_type = _validate_document_type(
-        document_type
-    )
+        destination = (
+            storage_directory
+            / safe_filename
+        )
 
-    # --------------------------------------------------------
-    # Generate document ID
-    # --------------------------------------------------------
+        # Avoid unnecessary copy when the source is already
+        # inside the destination directory.
+        try:
 
-    final_document_id = (
-        document_id
-        or f"{validated_type}_{uuid4().hex}"
-    )
+            if source.resolve() == destination.resolve():
+                return destination
 
-    # --------------------------------------------------------
-    # Calculate SHA-256
-    # --------------------------------------------------------
+        except FileNotFoundError:
+            pass
 
-    document_hash = calculate_sha256(
-        pdf_data
-    )
-
-    logger.info(
-        "Document ingestion started | "
-        "document_id=%s | type=%s | file=%s",
-        final_document_id,
-        validated_type,
-        safe_filename,
-    )
-
-    # --------------------------------------------------------
-    # Determine storage directory
-    # --------------------------------------------------------
-
-    storage_directory = _get_storage_directory(
-        validated_type
-    )
-
-    # --------------------------------------------------------
-    # Duplicate check
-    # --------------------------------------------------------
-
-    existing_file = _find_existing_document_by_hash(
-        storage_directory=storage_directory,
-        document_hash=document_hash,
-    )
-
-    if existing_file is not None:
+        shutil.copy2(
+            source,
+            destination,
+        )
 
         logger.info(
-            "Duplicate document detected | "
-            "document_id=%s | existing_file=%s",
-            final_document_id,
-            existing_file.name,
+            "Document saved | file=%s | destination=%s",
+            source.name,
+            destination,
         )
 
-        # Parse the existing document so the caller receives
-        # the same usable chunk structure as a new upload.
-        try:
-            existing_pdf_data = (
-                existing_file.read_bytes()
+        return destination
+
+    # ========================================================
+    # CHUNKING
+    # ========================================================
+
+    def chunk_documents(
+        self,
+        documents: list[LangChainDocument],
+    ) -> list[LangChainDocument]:
+        """
+        Split section-aware LangChain Documents into retrieval
+        chunks.
+
+        Section metadata is preserved on every resulting chunk.
+        """
+
+        if not documents:
+            return []
+
+        chunks = (
+            self._splitter.split_documents(
+                documents
+            )
+        )
+
+        # ----------------------------------------------------
+        # Add deterministic chunk metadata.
+        # ----------------------------------------------------
+
+        section_counters: dict[
+            str,
+            int,
+        ] = {}
+
+        for chunk in chunks:
+
+            document_id = chunk.metadata.get(
+                "document_id",
+                "unknown_document",
             )
 
-        except OSError as exc:
-            raise RuntimeError(
-                "Duplicate document was found, but the "
-                "stored PDF could not be read."
-            ) from exc
-
-        chunks = parse_pdf(
-            pdf_data=existing_pdf_data,
-            document_id=final_document_id,
-            document_type=validated_type,
-            source_file=existing_file.name,
-            document_hash=document_hash,
-            candidate_id=candidate_id,
-            candidate_name=candidate_name,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
-
-        return IngestionResult(
-            document_id=final_document_id,
-            document_type=validated_type,
-            source_file=existing_file.name,
-            stored_path=existing_file,
-            document_hash=document_hash,
-            chunks=chunks,
-            is_duplicate=True,
-        )
-
-    # --------------------------------------------------------
-    # Save new document
-    # --------------------------------------------------------
-
-    stored_path = _save_pdf(
-        pdf_data=pdf_data,
-        storage_directory=storage_directory,
-        filename=safe_filename,
-    )
-
-    # --------------------------------------------------------
-    # Parse and chunk
-    # --------------------------------------------------------
-
-    try:
-        chunks = parse_pdf(
-            pdf_data=pdf_data,
-            document_id=final_document_id,
-            document_type=validated_type,
-            source_file=safe_filename,
-            document_hash=document_hash,
-            candidate_id=candidate_id,
-            candidate_name=candidate_name,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
-
-    except Exception:
-        # If parsing fails after storage, remove the newly
-        # created file so we don't leave an unusable document
-        # behind.
-        try:
-            stored_path.unlink(
-                missing_ok=True
+            section = chunk.metadata.get(
+                "section",
+                "general",
             )
-        except OSError:
+
+            key = (
+                f"{document_id}:{section}"
+            )
+
+            current_index = (
+                section_counters.get(
+                    key,
+                    0,
+                )
+            )
+
+            chunk.metadata[
+                "chunk_index"
+            ] = current_index
+
+            chunk.metadata[
+                "chunk_id"
+            ] = (
+                f"{document_id}_"
+                f"{section}_"
+                f"{current_index:04d}"
+            )
+
+            section_counters[key] = (
+                current_index + 1
+            )
+
+        logger.info(
+            "Document chunking completed | "
+            "input_documents=%d | chunks=%d",
+            len(documents),
+            len(chunks),
+        )
+
+        return chunks
+
+    # ========================================================
+    # INDEXING
+    # ========================================================
+
+    def index_vector_store(
+        self,
+        chunks: list[LangChainDocument],
+    ) -> Any:
+        """
+        Send chunks to the Pinecone vector-store service.
+
+        The actual embedding and Pinecone logic lives in
+        vector_store.py.
+        """
+
+        if self.vector_store is None:
+
+            logger.warning(
+                "Vector store is not configured. "
+                "Skipping Pinecone indexing."
+            )
+
+            return None
+
+        logger.info(
+            "Starting vector-store indexing | chunks=%d",
+            len(chunks),
+        )
+
+        return self.vector_store.index_documents(
+            chunks
+        )
+
+    def index_bm25(
+        self,
+        chunks: list[LangChainDocument],
+    ) -> Any:
+        """
+        Send chunks to the BM25/hybrid indexing service.
+
+        The actual BM25 implementation lives in
+        hybrid_indexer.py.
+        """
+
+        if self.hybrid_indexer is None:
+
+            logger.warning(
+                "Hybrid indexer is not configured. "
+                "Skipping BM25 indexing."
+            )
+
+            return None
+
+        logger.info(
+            "Starting BM25 indexing | chunks=%d",
+            len(chunks),
+        )
+
+        return self.hybrid_indexer.add_documents(
+            chunks
+        )
+
+    # ========================================================
+    # REGISTRY
+    # ========================================================
+
+    def register_document(
+        self,
+        parsed_document: ParsedDocument,
+    ) -> Any:
+        """
+        Save successful ingestion metadata to the registry.
+        """
+
+        if self.registry is None:
+            return None
+
+        return self.registry.save(
+            parsed_document
+        )
+
+    # ========================================================
+    # SINGLE FILE INGESTION
+    # ========================================================
+
+    def ingest_file(
+        self,
+        file_path: str | Path,
+        document_type: DocumentType = DocumentType.RESUME,
+        save_copy: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Ingest one PDF.
+
+        Pipeline:
+
+            Validate
+                ↓
+            SHA-256
+                ↓
+            Duplicate check
+                ↓
+            Save local copy
+                ↓
+            Parse PDF
+                ↓
+            LangChain Documents
+                ↓
+            Chunk
+                ↓
+            Pinecone/vector indexing
+                ↓
+            BM25 indexing
+                ↓
+            Registry
+                ↓
+            Result
+
+        Returns:
+            Dictionary containing ingestion status and metadata.
+
+        A dictionary is returned here rather than tightly
+        constructing a Pydantic response so this service remains
+        compatible with the evolving ingestion schemas.
+        """
+
+        path = Path(file_path)
+
+        logger.info(
+            "Starting ingestion | file=%s | type=%s",
+            path.name,
+            document_type,
+        )
+
+        try:
+
+            # ------------------------------------------------
+            # 1. Validate
+            # ------------------------------------------------
+
+            self.validate_file(
+                path
+            )
+
+            # ------------------------------------------------
+            # 2. SHA-256
+            # ------------------------------------------------
+
+            document_hash = (
+                self.calculate_hash(
+                    path
+                )
+            )
+
+            logger.info(
+                "Document hash calculated | "
+                "file=%s | hash=%s",
+                path.name,
+                document_hash,
+            )
+
+            # ------------------------------------------------
+            # 3. Duplicate check
+            # ------------------------------------------------
+
+            if self.is_duplicate(
+                document_hash
+            ):
+
+                logger.info(
+                    "Duplicate document skipped | "
+                    "file=%s | hash=%s",
+                    path.name,
+                    document_hash,
+                )
+
+                return {
+                    "status": (
+                        IngestionStatus.SKIPPED
+                    ),
+                    "source_file": path.name,
+                    "document_hash": document_hash,
+                    "document_id": None,
+                    "candidate_id": None,
+                    "candidate_name": None,
+                    "chunk_count": 0,
+                    "error": None,
+                }
+
+            # ------------------------------------------------
+            # 4. Save local copy
+            # ------------------------------------------------
+
+            stored_path = path
+
+            if save_copy:
+
+                stored_path = (
+                    self.save_file(
+                        path,
+                        document_type,
+                    )
+                )
+
+            # ------------------------------------------------
+            # 5. Parse
+            # ------------------------------------------------
+
+            parsed_document = parse_pdf(
+                file_path=stored_path,
+                document_type=document_type,
+                document_hash=document_hash,
+            )
+
+            # ------------------------------------------------
+            # 6. Convert to LangChain Documents
+            # ------------------------------------------------
+
+            documents = (
+                to_langchain_documents(
+                    parsed_document
+                )
+            )
+
+            # ------------------------------------------------
+            # Log full parsed text at DEBUG only.
+            #
+            # This is useful during VS Code/backend debugging.
+            # It will not be displayed by Streamlit unless the
+            # application explicitly surfaces logs.
+            # ------------------------------------------------
+
+            logger.debug(
+                "FULL PARSED DOCUMENT TEXT | "
+                "document_id=%s\n%s",
+                parsed_document.document_id,
+                parsed_document.text,
+            )
+
+            # ------------------------------------------------
+            # 7. Chunk
+            # ------------------------------------------------
+
+            chunks = self.chunk_documents(
+                documents
+            )
+
+            if not chunks:
+
+                raise ValueError(
+                    "No retrieval chunks were created."
+                )
+
+            # ------------------------------------------------
+            # 8. Vector indexing
+            # ------------------------------------------------
+
+            vector_result = (
+                self.index_vector_store(
+                    chunks
+                )
+            )
+
+            # ------------------------------------------------
+            # 9. BM25 indexing
+            # ------------------------------------------------
+
+            bm25_result = (
+                self.index_bm25(
+                    chunks
+                )
+            )
+
+            # ------------------------------------------------
+            # 10. Registry
+            # ------------------------------------------------
+
+            self.register_document(
+                parsed_document
+            )
+
+            # ------------------------------------------------
+            # Successful result
+            # ------------------------------------------------
+
+            result = {
+                "status": (
+                    IngestionStatus.COMPLETED
+                ),
+                "source_file": path.name,
+                "stored_file": str(
+                    stored_path
+                ),
+                "document_hash": (
+                    document_hash
+                ),
+                "document_id": (
+                    parsed_document.document_id
+                ),
+                "candidate_id": (
+                    parsed_document.candidate_id
+                ),
+                "candidate_name": (
+                    parsed_document.candidate_name
+                ),
+                "chunk_count": len(chunks),
+                "page_count": (
+                    parsed_document.page_count
+                ),
+                "sections": list(
+                    parsed_document.sections.keys()
+                ),
+                "vector_result": vector_result,
+                "bm25_result": bm25_result,
+                "error": None,
+            }
+
+            logger.info(
+                "Ingestion completed successfully | "
+                "file=%s | document_id=%s | "
+                "chunks=%d",
+                path.name,
+                parsed_document.document_id,
+                len(chunks),
+            )
+
+            return result
+
+        except Exception as exc:
+
             logger.exception(
-                "Failed to clean up stored PDF after "
-                "parsing failure | path=%s",
-                stored_path,
+                "Ingestion failed | file=%s | "
+                "error_type=%s",
+                path.name,
+                type(exc).__name__,
             )
 
-        raise
+            return {
+                "status": (
+                    IngestionStatus.FAILED
+                ),
+                "source_file": path.name,
+                "stored_file": None,
+                "document_hash": None,
+                "document_id": None,
+                "candidate_id": None,
+                "candidate_name": None,
+                "chunk_count": 0,
+                "page_count": 0,
+                "sections": [],
+                "vector_result": None,
+                "bm25_result": None,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
 
-    # --------------------------------------------------------
-    # Log successful ingestion
-    # --------------------------------------------------------
+    # ========================================================
+    # BATCH INGESTION
+    # ========================================================
 
-    logger.info(
-        "Document ingestion completed | "
-        "document_id=%s | type=%s | chunks=%d",
-        final_document_id,
-        validated_type,
-        len(chunks),
-    )
+    def ingest_batch(
+        self,
+        file_paths: list[str | Path],
+        document_type: DocumentType = DocumentType.RESUME,
+        save_copy: bool = True,
+        progress_callback: Optional[
+            Callable[[int, int, dict[str, Any]], None]
+        ] = None,
+    ) -> dict[str, Any]:
+        """
+        Ingest multiple files.
 
-    return IngestionResult(
-        document_id=final_document_id,
-        document_type=validated_type,
-        source_file=safe_filename,
-        stored_path=stored_path,
-        document_hash=document_hash,
-        chunks=chunks,
-        is_duplicate=False,
+        Important behavior:
+
+            One failed document does NOT stop the entire batch.
+
+        This follows the architecture requirement that batch
+        ingestion should report individual failures while
+        successful files continue. :contentReference[oaicite:1]{index=1}
+
+        Args:
+            file_paths:
+                Files to ingest.
+
+            document_type:
+                RESUME or JD.
+
+            save_copy:
+                Whether to save files into data/resumes or
+                data/jds.
+
+            progress_callback:
+                Optional callback:
+
+                    callback(
+                        completed,
+                        total,
+                        result
+                    )
+        """
+
+        total = len(
+            file_paths
+        )
+
+        results: list[
+            dict[str, Any]
+        ] = []
+
+        completed = 0
+        successful = 0
+        skipped = 0
+        failed = 0
+        total_chunks = 0
+
+        logger.info(
+            "Starting batch ingestion | total=%d | type=%s",
+            total,
+            document_type,
+        )
+
+        for file_path in file_paths:
+
+            result = self.ingest_file(
+                file_path=file_path,
+                document_type=document_type,
+                save_copy=save_copy,
+            )
+
+            results.append(
+                result
+            )
+
+            completed += 1
+
+            status = result.get(
+                "status"
+            )
+
+            if status == IngestionStatus.COMPLETED:
+                successful += 1
+
+            elif status == IngestionStatus.SKIPPED:
+                skipped += 1
+
+            else:
+                failed += 1
+
+            total_chunks += int(
+                result.get(
+                    "chunk_count",
+                    0,
+                )
+                or 0
+            )
+
+            if progress_callback:
+
+                try:
+
+                    progress_callback(
+                        completed,
+                        total,
+                        result,
+                    )
+
+                except Exception:
+
+                    logger.exception(
+                        "Progress callback failed."
+                    )
+
+        batch_result = {
+            "total_files": total,
+            "processed_files": completed,
+            "successful_files": successful,
+            "skipped_files": skipped,
+            "failed_files": failed,
+            "total_chunks": total_chunks,
+            "results": results,
+        }
+
+        logger.info(
+            "Batch ingestion completed | "
+            "total=%d | successful=%d | "
+            "skipped=%d | failed=%d | chunks=%d",
+            total,
+            successful,
+            skipped,
+            failed,
+            total_chunks,
+        )
+
+        return batch_result
+
+
+# ============================================================
+# DEFAULT SERVICE FACTORY
+# ============================================================
+
+
+def create_ingestion_service(
+    vector_store: Optional[
+        VectorStoreProtocol
+    ] = None,
+    hybrid_indexer: Optional[
+        HybridIndexerProtocol
+    ] = None,
+    registry: Optional[
+        RegistryProtocol
+    ] = None,
+) -> IngestionService:
+    """
+    Create an IngestionService.
+
+    Dependencies are optional because the concrete Pinecone,
+    BM25 and registry implementations are built in their own
+    modules.
+    """
+
+    return IngestionService(
+        vector_store=vector_store,
+        hybrid_indexer=hybrid_indexer,
+        registry=registry,
     )
 
 
 # ============================================================
-# Batch Ingestion
+# CONVENIENCE FUNCTIONS
 # ============================================================
 
 
-def ingest_documents(
-    documents: list[tuple[bytes, str]],
-    document_type: DocumentType,
-    candidate_ids: list[str | None] | None = None,
-    candidate_names: list[str | None] | None = None,
-) -> list[IngestionResult]:
+def ingest_file(
+    file_path: str | Path,
+    document_type: DocumentType = DocumentType.RESUME,
+    vector_store: Optional[
+        VectorStoreProtocol
+    ] = None,
+    hybrid_indexer: Optional[
+        HybridIndexerProtocol
+    ] = None,
+    registry: Optional[
+        RegistryProtocol
+    ] = None,
+) -> dict[str, Any]:
     """
-    Ingest multiple PDF documents.
-
-    Parameters
-    ----------
-    documents:
-        List of tuples:
-            (pdf_bytes, filename)
-
-    document_type:
-        "resume" or "jd".
-
-    candidate_ids:
-        Optional candidate IDs corresponding to documents.
-
-    candidate_names:
-        Optional candidate names corresponding to documents.
-
-    Returns
-    -------
-    list[IngestionResult]
-        Successful ingestion results.
-
-    Notes
-    -----
-    Documents are processed independently. If one document
-    fails, the exception is raised rather than silently
-    continuing, because ingestion failures should be visible
-    to the caller.
+    Convenience wrapper for single-file ingestion.
     """
 
-    if not documents:
-        raise ValueError(
-            "documents cannot be empty."
-        )
-
-    if candidate_ids is not None and len(
-        candidate_ids
-    ) != len(documents):
-
-        raise ValueError(
-            "candidate_ids length must match documents length."
-        )
-
-    if candidate_names is not None and len(
-        candidate_names
-    ) != len(documents):
-
-        raise ValueError(
-            "candidate_names length must match documents length."
-        )
-
-    results: list[IngestionResult] = []
-
-    for index, (
-        pdf_data,
-        filename,
-    ) in enumerate(documents):
-
-        candidate_id = (
-            candidate_ids[index]
-            if candidate_ids
-            else None
-        )
-
-        candidate_name = (
-            candidate_names[index]
-            if candidate_names
-            else None
-        )
-
-        result = ingest_document(
-            pdf_data=pdf_data,
-            filename=filename,
-            document_type=document_type,
-            candidate_id=candidate_id,
-            candidate_name=candidate_name,
-        )
-
-        results.append(result)
-
-    logger.info(
-        "Batch ingestion completed | "
-        "type=%s | documents=%d",
-        document_type,
-        len(results),
+    service = create_ingestion_service(
+        vector_store=vector_store,
+        hybrid_indexer=hybrid_indexer,
+        registry=registry,
     )
 
-    return results
+    return service.ingest_file(
+        file_path=file_path,
+        document_type=document_type,
+    )
+
+
+def ingest_batch(
+    file_paths: list[str | Path],
+    document_type: DocumentType = DocumentType.RESUME,
+    vector_store: Optional[
+        VectorStoreProtocol
+    ] = None,
+    hybrid_indexer: Optional[
+        HybridIndexerProtocol
+    ] = None,
+    registry: Optional[
+        RegistryProtocol
+    ] = None,
+    progress_callback: Optional[
+        Callable[[int, int, dict[str, Any]], None]
+    ] = None,
+) -> dict[str, Any]:
+    """
+    Convenience wrapper for batch ingestion.
+    """
+
+    service = create_ingestion_service(
+        vector_store=vector_store,
+        hybrid_indexer=hybrid_indexer,
+        registry=registry,
+    )
+
+    return service.ingest_batch(
+        file_paths=file_paths,
+        document_type=document_type,
+        progress_callback=progress_callback,
+    )
+
+
+# ============================================================
+# PUBLIC API
+# ============================================================
+
+
+__all__ = [
+    "IngestionService",
+    "VectorStoreProtocol",
+    "HybridIndexerProtocol",
+    "RegistryProtocol",
+    "create_ingestion_service",
+    "ingest_file",
+    "ingest_batch",
+]

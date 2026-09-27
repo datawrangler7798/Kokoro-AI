@@ -1,276 +1,403 @@
 """
-PDF parsing and chunking utilities for Kokoro AI.
+core/ingestion/parsing.py
+
+PDF parsing and text preprocessing for Kokoro.
 
 Responsibilities:
-- Validate PDF files
-- Extract text using PyPDF
-- Normalize extracted text
-- Create LangChain Documents
-- Split documents into retrieval-friendly chunks
+    - Extract text from PDF files using PyPDF.
+    - Normalize extracted text.
+    - Remove PDF extraction noise safely.
+    - Preserve resume meaning, headings, dates and acronyms.
+    - Detect common resume sections.
+    - Extract basic candidate metadata.
+    - Build LangChain Document objects.
+    - Provide parsed document content to the ingestion layer.
 
-This module does NOT:
-- Generate embeddings
-- Write to Pinecone
-- Build the BM25 index
-- Call Gemini
+Important:
+    This module does NOT:
+        - Generate embeddings
+        - Call Pinecone
+        - Update BM25
+        - Perform retrieval
+        - Call Gemini
+        - Perform chunking/indexing orchestration
+        - Import Streamlit
 
-Those responsibilities belong to the ingestion/indexing layers.
+The ingestion layer will use the parsed output produced here.
 """
 
 from __future__ import annotations
 
-import io
 import re
 import unicodedata
 from pathlib import Path
-from typing import BinaryIO
+from typing import Optional
 
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 
-from utils.logger import logger
-from utils.utils import normalize_text
+from langchain_core.documents import Document as LangChainDocument
+
+from utils.logger import get_logger
+from utils.utils import (
+    calculate_file_hash,
+    clean_string,
+    normalize_text,
+)
+from utils.schemas import DocumentType
 
 
 # ============================================================
-# Constants
+# LOGGER
 # ============================================================
 
-ALLOWED_PDF_EXTENSION = ".pdf"
-
-DEFAULT_CHUNK_SIZE = 800
-
-DEFAULT_CHUNK_OVERLAP = 120
-
-MIN_EXTRACTED_TEXT_LENGTH = 20
+logger = get_logger(__name__)
 
 
 # ============================================================
-# PDF Validation
+# CONSTANTS
+# ============================================================
+
+SUPPORTED_SECTION_NAMES = {
+    "professional summary": "professional_summary",
+    "summary": "summary",
+    "profile": "profile",
+    "objective": "objective",
+    "technical skills": "technical_skills",
+    "technical skill": "technical_skills",
+    "skills": "skills",
+    "core skills": "skills",
+    "key skills": "skills",
+    "software proficiency": "software_proficiency",
+    "software skills": "software_proficiency",
+    "professional experience": "professional_experience",
+    "work experience": "professional_experience",
+    "experience": "professional_experience",
+    "employment history": "professional_experience",
+    "education": "education",
+    "educational qualification": "education",
+    "academic qualification": "education",
+    "certifications": "certifications",
+    "certification": "certifications",
+    "achievements": "achievements",
+    "awards": "achievements",
+    "projects": "projects",
+    "professional projects": "projects",
+    "references": "references",
+    "reference": "references",
+}
+
+
+# ============================================================
+# PDF EXTRACTION
 # ============================================================
 
 
-def validate_pdf(
-    pdf_data: bytes,
-    filename: str | None = None,
-) -> None:
+def extract_pdf_text(
+    file_path: str | Path,
+) -> str:
     """
-    Validate that the supplied bytes represent a readable PDF.
+    Extract text from all pages of a PDF.
 
-    Parameters
-    ----------
-    pdf_data:
-        Raw PDF bytes.
+    Args:
+        file_path:
+            Path to the PDF file.
 
-    filename:
-        Optional filename used to validate the extension.
+    Returns:
+        Raw extracted PDF text.
 
-    Raises
-    ------
-    ValueError
-        If the input is invalid or cannot be read as a PDF.
+    Raises:
+        FileNotFoundError:
+            If the PDF does not exist.
+
+        ValueError:
+            If the PDF cannot be read or contains no text.
+
+        Exception:
+            For unexpected PDF parsing errors.
     """
 
-    if not pdf_data:
-        raise ValueError("PDF file is empty.")
+    path = Path(file_path)
 
-    if filename:
-        extension = Path(filename).suffix.lower()
-
-        if extension != ALLOWED_PDF_EXTENSION:
-            raise ValueError(
-                f"Unsupported file type: {extension}. "
-                "Only PDF files are supported."
-            )
-
-    # Basic PDF signature check.
-    if not pdf_data.startswith(b"%PDF"):
-        raise ValueError(
-            "Invalid PDF file signature."
+    if not path.exists():
+        raise FileNotFoundError(
+            f"PDF file not found: {path}"
         )
+
+    if not path.is_file():
+        raise ValueError(
+            f"PDF path is not a file: {path}"
+        )
+
+    logger.info(
+        "Starting PDF text extraction | file=%s",
+        path.name,
+    )
 
     try:
         reader = PdfReader(
-            io.BytesIO(pdf_data)
+            str(path)
         )
 
-        if not reader.pages:
+        extracted_pages: list[str] = []
+
+        for page_number, page in enumerate(
+            reader.pages,
+            start=1,
+        ):
+
+            try:
+                page_text = (
+                    page.extract_text()
+                    or ""
+                )
+
+            except Exception as exc:
+
+                logger.warning(
+                    "Failed to extract page %d | "
+                    "file=%s | error=%s",
+                    page_number,
+                    path.name,
+                    str(exc),
+                )
+
+                page_text = ""
+
+            if page_text.strip():
+                extracted_pages.append(
+                    page_text
+                )
+
+        raw_text = "\n\n".join(
+            extracted_pages
+        )
+
+        if not raw_text.strip():
+
             raise ValueError(
-                "PDF does not contain any pages."
+                f"No extractable text found in PDF: "
+                f"{path.name}"
             )
 
+        logger.info(
+            "PDF extraction completed | file=%s "
+            "| pages=%d | characters=%d",
+            path.name,
+            len(reader.pages),
+            len(raw_text),
+        )
+
+        return raw_text
+
+    except ValueError:
+        raise
+
     except Exception as exc:
+
+        logger.exception(
+            "PDF extraction failed | file=%s",
+            path.name,
+        )
+
         raise ValueError(
-            "Unable to read the supplied PDF."
+            f"Failed to parse PDF: {path.name}"
         ) from exc
 
 
 # ============================================================
-# Unicode Normalization
+# UNICODE NORMALIZATION
 # ============================================================
 
 
-def normalize_unicode(text: str) -> str:
+def normalize_unicode(
+    text: str,
+) -> str:
     """
-    Apply safe Unicode normalization.
+    Normalize Unicode characters.
 
-    This helps normalize visually equivalent Unicode
-    representations without aggressively modifying the
-    document's content.
-
-    Parameters
-    ----------
-    text:
-        Extracted PDF text.
-
-    Returns
-    -------
-    str
-        Unicode-normalized text.
+    NFC is used so that visually equivalent Unicode
+    representations are normalized while preserving
+    meaningful text.
     """
 
     if not text:
         return ""
 
     return unicodedata.normalize(
-        "NFKC",
+        "NFC",
         text,
     )
 
 
 # ============================================================
-# PDF Text Extraction
+# CONTROL CHARACTER REMOVAL
 # ============================================================
 
 
-def extract_pdf_text(
-    pdf_data: bytes,
-) -> list[dict[str, object]]:
-    """
-    Extract text from every PDF page.
-
-    Parameters
-    ----------
-    pdf_data:
-        Raw PDF bytes.
-
-    Returns
-    -------
-    list[dict]
-        Page-level extracted text.
-
-        Example:
-        [
-            {
-                "page_number": 1,
-                "text": "Resume content..."
-            }
-        ]
-
-    Raises
-    ------
-    ValueError
-        If the PDF cannot be read or contains no useful text.
-    """
-
-    validate_pdf(pdf_data)
-
-    try:
-        reader = PdfReader(
-            io.BytesIO(pdf_data)
-        )
-
-        pages: list[dict[str, object]] = []
-
-        for page_number, page in enumerate(
-            reader.pages,
-            start=1,
-        ):
-            raw_text = page.extract_text() or ""
-
-            text = normalize_unicode(
-                raw_text
-            )
-
-            text = normalize_text(
-                text
-            )
-
-            if text:
-                pages.append(
-                    {
-                        "page_number": page_number,
-                        "text": text,
-                    }
-                )
-
-        if not pages:
-            raise ValueError(
-                "No extractable text was found in the PDF. "
-                "The document may be scanned/image-only."
-            )
-
-        total_text = " ".join(
-            str(page["text"])
-            for page in pages
-        )
-
-        if len(total_text.strip()) < MIN_EXTRACTED_TEXT_LENGTH:
-            raise ValueError(
-                "The PDF contains insufficient extractable text."
-            )
-
-        logger.info(
-            "PDF text extraction completed | pages=%d",
-            len(pages),
-        )
-
-        return pages
-
-    except ValueError:
-        raise
-
-    except Exception as exc:
-        logger.exception(
-            "PDF text extraction failed."
-        )
-
-        raise ValueError(
-            "Failed to extract text from PDF."
-        ) from exc
-
-
-# ============================================================
-# Page Text Preparation
-# ============================================================
-
-
-def prepare_page_text(
+def remove_control_characters(
     text: str,
 ) -> str:
     """
-    Perform safe preprocessing on extracted page text.
+    Remove null/control characters while preserving:
 
-    The preprocessing intentionally avoids:
-    - aggressive lowercasing
-    - stop-word removal
-    - stemming
-    - punctuation removal
+        - newline
+        - carriage return
+        - tab
 
-    This is important for resumes because information such as:
-    Python, C++, SQL, .NET, AWS, GCP, dates, percentages,
-    and job titles should remain readable.
+    This follows the architecture requirement to remove
+    extraction noise without destroying resume meaning.
+    """
 
-    Parameters
-    ----------
-    text:
-        Raw extracted page text.
+    if not text:
+        return ""
 
-    Returns
-    -------
-    str
-        Cleaned text.
+    cleaned_characters: list[str] = []
+
+    for character in text:
+
+        if character in (
+            "\n",
+            "\r",
+            "\t",
+        ):
+            cleaned_characters.append(
+                character
+            )
+            continue
+
+        category = unicodedata.category(
+            character
+        )
+
+        if category.startswith("C"):
+            continue
+
+        cleaned_characters.append(
+            character
+        )
+
+    return "".join(
+        cleaned_characters
+    )
+
+
+# ============================================================
+# PDF ARTIFACT CLEANING
+# ============================================================
+
+
+def fix_pdf_artifacts(
+    text: str,
+) -> str:
+    """
+    Fix common PDF text extraction artifacts.
+
+    The function intentionally performs only conservative
+    transformations.
+
+    It does NOT:
+        - aggressively lowercase text
+        - remove punctuation
+        - remove stopwords
+        - stem words
+        - remove dates
+        - remove acronyms
+
+    Those transformations could damage resume evidence.
+    """
+
+    if not text:
+        return ""
+
+    # --------------------------------------------------------
+    # Remove soft hyphen characters.
+    # --------------------------------------------------------
+
+    text = text.replace(
+        "\u00ad",
+        "",
+    )
+
+    # --------------------------------------------------------
+    # Normalize non-breaking spaces.
+    # --------------------------------------------------------
+
+    text = text.replace(
+        "\u00a0",
+        " ",
+    )
+
+    # --------------------------------------------------------
+    # Repair words broken across lines.
+    #
+    # Example:
+    #
+    #   Gener-
+    #   ative AI
+    #
+    # becomes:
+    #
+    #   Generative AI
+    # --------------------------------------------------------
+
+    text = re.sub(
+        r"(?<=\w)-\s*\n\s*(?=\w)",
+        "",
+        text,
+    )
+
+    # --------------------------------------------------------
+    # Normalize CRLF / CR.
+    # --------------------------------------------------------
+
+    text = text.replace(
+        "\r\n",
+        "\n",
+    )
+
+    text = text.replace(
+        "\r",
+        "\n",
+    )
+
+    # --------------------------------------------------------
+    # Remove excessive spaces around newlines.
+    # --------------------------------------------------------
+
+    text = re.sub(
+        r"[ \t]+\n",
+        "\n",
+        text,
+    )
+
+    text = re.sub(
+        r"\n[ \t]+",
+        "\n",
+        text,
+    )
+
+    return text
+
+
+# ============================================================
+# TEXT PREPROCESSING
+# ============================================================
+
+
+def preprocess_text(
+    text: str,
+) -> str:
+    """
+    Perform light resume/JD text preprocessing.
+
+    Processing includes:
+
+        1. Unicode normalization
+        2. Control-character removal
+        3. Conservative PDF artifact correction
+        4. Whitespace normalization
+
+    The original meaning and readable structure are preserved.
     """
 
     if not text:
@@ -280,33 +407,43 @@ def prepare_page_text(
         text
     )
 
-    text = normalize_text(
+    text = remove_control_characters(
         text
     )
 
-    # Normalize common PDF line-break artifacts.
-    text = re.sub(
-        r"-\n(?=\w)",
-        "",
-        text,
+    text = fix_pdf_artifacts(
+        text
     )
 
-    # Convert single line breaks occurring inside a sentence
-    # into spaces while preserving paragraph boundaries.
-    text = re.sub(
-        r"(?<!\n)\n(?!\n)",
-        " ",
-        text,
+    # Use the shared utility for general whitespace
+    # normalization while preserving line structure.
+    lines = text.splitlines()
+
+    cleaned_lines: list[str] = []
+
+    for line in lines:
+
+        line = line.strip()
+
+        if not line:
+            cleaned_lines.append("")
+            continue
+
+        line = re.sub(
+            r"[ \t]+",
+            " ",
+            line,
+        )
+
+        cleaned_lines.append(
+            line
+        )
+
+    text = "\n".join(
+        cleaned_lines
     )
 
-    # Collapse excessive spaces again after line processing.
-    text = re.sub(
-        r"[ \t]+",
-        " ",
-        text,
-    )
-
-    # Keep a maximum of two consecutive newlines.
+    # Collapse excessive blank lines.
     text = re.sub(
         r"\n{3,}",
         "\n\n",
@@ -317,315 +454,786 @@ def prepare_page_text(
 
 
 # ============================================================
-# LangChain Documents
+# SECTION DETECTION
 # ============================================================
 
 
-def create_documents(
-    pages: list[dict[str, object]],
-    document_id: str,
-    document_type: str,
-    source_file: str,
-    document_hash: str,
-    candidate_id: str | None = None,
-    candidate_name: str | None = None,
-) -> list[Document]:
+def normalize_section_name(
+    section_name: str,
+) -> str:
     """
-    Convert page-level text into LangChain Documents.
-
-    Each page initially becomes one Document. Chunking is
-    performed separately by `split_documents()`.
-
-    Parameters
-    ----------
-    pages:
-        Output from `extract_pdf_text()`.
-
-    document_id:
-        Unique document identifier.
-
-    document_type:
-        Type of document, e.g. "resume" or "jd".
-
-    source_file:
-        Original filename.
-
-    document_hash:
-        SHA-256 hash of the source PDF.
-
-    candidate_id:
-        Optional candidate identifier.
-
-    candidate_name:
-        Optional candidate name.
-
-    Returns
-    -------
-    list[Document]
-        LangChain Documents with metadata.
+    Normalize a section heading into a canonical name.
     """
 
-    documents: list[Document] = []
+    cleaned = clean_string(
+        section_name
+    )
 
-    for page in pages:
-        page_number = int(
-            page["page_number"]
-        )
+    cleaned = cleaned.lower()
 
-        text = str(
-            page["text"]
-        )
+    cleaned = re.sub(
+        r"[:\-]+$",
+        "",
+        cleaned,
+    )
 
-        text = prepare_page_text(
-            text
-        )
+    cleaned = re.sub(
+        r"\s+",
+        " ",
+        cleaned,
+    )
 
-        if not text:
-            continue
+    return SUPPORTED_SECTION_NAMES.get(
+        cleaned,
+        cleaned.replace(
+            " ",
+            "_",
+        ),
+    )
 
-        metadata = {
-            "document_id": document_id,
-            "document_type": document_type,
-            "source_file": source_file,
-            "document_hash": document_hash,
-            "page_number": page_number,
+
+def is_section_heading(
+    line: str,
+) -> bool:
+    """
+    Determine whether a line is likely to be a resume section
+    heading.
+
+    Known section names are preferred.
+
+    A conservative heuristic is also used for headings that
+    are written in uppercase.
+    """
+
+    if not line:
+        return False
+
+    cleaned = line.strip()
+
+    if not cleaned:
+        return False
+
+    normalized = (
+        cleaned
+        .lower()
+        .rstrip(":")
+        .strip()
+    )
+
+    if normalized in SUPPORTED_SECTION_NAMES:
+        return True
+
+    # --------------------------------------------------------
+    # Uppercase heading heuristic.
+    #
+    # Example:
+    # PROFESSIONAL EXPERIENCE
+    # EDUCATION
+    # CERTIFICATIONS
+    # --------------------------------------------------------
+
+    letters = [
+        character
+        for character in cleaned
+        if character.isalpha()
+    ]
+
+    if not letters:
+        return False
+
+    uppercase_ratio = sum(
+        character.isupper()
+        for character in letters
+    ) / len(letters)
+
+    if (
+        uppercase_ratio >= 0.85
+        and len(cleaned) <= 80
+        and len(cleaned.split()) <= 8
+    ):
+        return True
+
+    return False
+
+
+def extract_sections(
+    text: str,
+) -> dict[str, str]:
+    """
+    Split parsed text into logical resume sections.
+
+    Returns:
+
+        {
+            "professional_summary": "...",
+            "technical_skills": "...",
+            "professional_experience": "...",
+            "education": "..."
         }
 
-        if candidate_id:
-            metadata["candidate_id"] = candidate_id
+    Unknown headings are preserved using a normalized heading
+    name rather than being discarded.
+    """
 
-        if candidate_name:
-            metadata["candidate_name"] = candidate_name
+    if not text.strip():
+        return {}
 
-        documents.append(
-            Document(
-                page_content=text,
-                metadata=metadata,
+    lines = text.splitlines()
+
+    sections: dict[str, list[str]] = {}
+
+    current_section = "general"
+
+    sections[current_section] = []
+
+    for line in lines:
+
+        stripped = line.strip()
+
+        if not stripped:
+            sections[
+                current_section
+            ].append("")
+
+            continue
+
+        if is_section_heading(
+            stripped
+        ):
+
+            current_section = (
+                normalize_section_name(
+                    stripped
+                )
+            )
+
+            if current_section not in sections:
+                sections[
+                    current_section
+                ] = []
+
+            continue
+
+        sections[
+            current_section
+        ].append(stripped)
+
+    result: dict[str, str] = {}
+
+    for section, section_lines in sections.items():
+
+        section_text = "\n".join(
+            section_lines
+        ).strip()
+
+        if section_text:
+            result[section] = section_text
+
+    return result
+
+
+# ============================================================
+# CANDIDATE NAME EXTRACTION
+# ============================================================
+
+
+def _looks_like_name(
+    line: str,
+) -> bool:
+    """
+    Conservative check for a candidate name.
+
+    This is intentionally heuristic.
+
+    The parser should not assume every first line is a name.
+    """
+
+    if not line:
+        return False
+
+    line = line.strip()
+
+    if len(line) > 100:
+        return False
+
+    if any(
+        character.isdigit()
+        for character in line
+    ):
+        return False
+
+    words = line.split()
+
+    if not 2 <= len(words) <= 5:
+        return False
+
+    blocked_terms = {
+        "resume",
+        "curriculum vitae",
+        "cv",
+        "profile",
+        "summary",
+        "professional summary",
+        "technical skills",
+        "skills",
+        "experience",
+        "education",
+        "objective",
+    }
+
+    if line.lower() in blocked_terms:
+        return False
+
+    alpha_count = sum(
+        character.isalpha()
+        for character in line
+    )
+
+    if alpha_count < 3:
+        return False
+
+    return True
+
+
+def extract_candidate_name(
+    text: str,
+) -> Optional[str]:
+    """
+    Extract a candidate name from the beginning of the
+    document.
+
+    The parser checks the first meaningful lines rather than
+    assuming the first line is always the candidate name.
+    """
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    # Only inspect a small number of leading lines.
+    for line in lines[:10]:
+
+        if _looks_like_name(line):
+            return line
+
+    return None
+
+
+# ============================================================
+# DOCUMENT ID
+# ============================================================
+
+
+def create_document_id(
+    file_path: str | Path,
+    document_hash: Optional[str] = None,
+) -> str:
+    """
+    Create a deterministic document ID.
+
+    The preferred source is the document SHA-256 hash.
+
+    If a hash is not supplied, the file hash is calculated.
+    """
+
+    path = Path(file_path)
+
+    if document_hash is None:
+        document_hash = (
+            calculate_file_hash(
+                path
             )
         )
 
-    if not documents:
-        raise ValueError(
-            "No usable documents were created from the PDF."
+    return (
+        f"document_{document_hash[:16]}"
+    )
+
+
+# ============================================================
+# CANDIDATE ID
+# ============================================================
+
+
+def create_candidate_id(
+    candidate_name: Optional[str],
+    document_hash: str,
+) -> str:
+    """
+    Create a stable candidate identifier.
+
+    Candidate name is preferred when available.
+
+    Document hash is included as a fallback to guarantee that
+    an ID can still be created when the candidate name cannot
+    be extracted.
+    """
+
+    if candidate_name:
+
+        candidate = (
+            candidate_name
+            .lower()
+            .strip()
         )
+
+        candidate = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            candidate,
+        )
+
+        candidate = candidate.strip(
+            "_"
+        )
+
+        if candidate:
+            return candidate
+
+    return (
+        f"candidate_{document_hash[:16]}"
+    )
+
+
+# ============================================================
+# PARSED DOCUMENT RESULT
+# ============================================================
+
+
+class ParsedDocument:
+    """
+    Internal parsing result.
+
+    This object keeps parsing output separate from retrieval
+    and indexing concerns.
+
+    Attributes:
+        document_id:
+            Unique document identifier.
+
+        document_type:
+            Resume or JD.
+
+        candidate_id:
+            Candidate identifier when applicable.
+
+        candidate_name:
+            Candidate name when detected.
+
+        source_file:
+            Original filename.
+
+        document_hash:
+            SHA-256 hash.
+
+        text:
+            Full normalized document text.
+
+        sections:
+            Section-aware representation.
+
+        page_count:
+            Number of pages extracted from the PDF.
+    """
+
+    def __init__(
+        self,
+        document_id: str,
+        document_type: DocumentType,
+        candidate_id: Optional[str],
+        candidate_name: Optional[str],
+        source_file: str,
+        document_hash: str,
+        text: str,
+        sections: dict[str, str],
+        page_count: int,
+    ) -> None:
+
+        self.document_id = document_id
+        self.document_type = document_type
+        self.candidate_id = candidate_id
+        self.candidate_name = candidate_name
+        self.source_file = source_file
+        self.document_hash = document_hash
+        self.text = text
+        self.sections = sections
+        self.page_count = page_count
+
+    def to_dict(self) -> dict:
+        """
+        Convert the parsed document to a dictionary.
+        """
+
+        return {
+            "document_id": self.document_id,
+            "document_type": self.document_type,
+            "candidate_id": self.candidate_id,
+            "candidate_name": self.candidate_name,
+            "source_file": self.source_file,
+            "document_hash": self.document_hash,
+            "text": self.text,
+            "sections": self.sections,
+            "page_count": self.page_count,
+        }
+
+
+# ============================================================
+# MAIN PARSER
+# ============================================================
+
+
+def parse_pdf(
+    file_path: str | Path,
+    document_type: DocumentType = DocumentType.RESUME,
+    document_id: Optional[str] = None,
+    document_hash: Optional[str] = None,
+) -> ParsedDocument:
+    """
+    Parse a PDF into a structured ParsedDocument.
+
+    Processing:
+
+        PDF
+         ↓
+        PyPDF extraction
+         ↓
+        Unicode normalization
+         ↓
+        Control-character removal
+         ↓
+        PDF artifact correction
+         ↓
+        Whitespace normalization
+         ↓
+        Candidate metadata extraction
+         ↓
+        Section detection
+         ↓
+        ParsedDocument
+
+    Args:
+        file_path:
+            Path to the PDF.
+
+        document_type:
+            RESUME or JD.
+
+        document_id:
+            Optional existing document ID.
+
+        document_hash:
+            Optional existing SHA-256 hash.
+
+    Returns:
+        ParsedDocument
+    """
+
+    path = Path(file_path)
+
+    logger.info(
+        "Starting document parsing | file=%s",
+        path.name,
+    )
+
+    # --------------------------------------------------------
+    # Calculate document hash when not already supplied.
+    # --------------------------------------------------------
+
+    if document_hash is None:
+
+        document_hash = (
+            calculate_file_hash(
+                path
+            )
+        )
+
+    # --------------------------------------------------------
+    # Create document ID when not already supplied.
+    # --------------------------------------------------------
+
+    if document_id is None:
+
+        document_id = (
+            create_document_id(
+                path,
+                document_hash,
+            )
+        )
+
+    # --------------------------------------------------------
+    # Extract PDF text.
+    # --------------------------------------------------------
+
+    raw_text = extract_pdf_text(
+        path
+    )
+
+    # --------------------------------------------------------
+    # Preprocess.
+    # --------------------------------------------------------
+
+    processed_text = preprocess_text(
+        raw_text
+    )
+
+    if not processed_text:
+
+        raise ValueError(
+            f"PDF contains no usable text: "
+            f"{path.name}"
+        )
+
+    # --------------------------------------------------------
+    # Candidate metadata.
+    # --------------------------------------------------------
+
+    candidate_name = (
+        extract_candidate_name(
+            processed_text
+        )
+    )
+
+    candidate_id: Optional[str] = None
+
+    if document_type == DocumentType.RESUME:
+
+        candidate_id = (
+            create_candidate_id(
+                candidate_name,
+                document_hash,
+            )
+        )
+
+    # --------------------------------------------------------
+    # Section parsing.
+    # --------------------------------------------------------
+
+    sections = extract_sections(
+        processed_text
+    )
+
+    # --------------------------------------------------------
+    # Determine page count.
+    # --------------------------------------------------------
+
+    try:
+
+        reader = PdfReader(
+            str(path)
+        )
+
+        page_count = len(
+            reader.pages
+        )
+
+    except Exception:
+
+        page_count = 0
+
+    parsed_document = ParsedDocument(
+        document_id=document_id,
+        document_type=document_type,
+        candidate_id=candidate_id,
+        candidate_name=candidate_name,
+        source_file=path.name,
+        document_hash=document_hash,
+        text=processed_text,
+        sections=sections,
+        page_count=page_count,
+    )
+
+    logger.info(
+        "Document parsing completed | "
+        "document_id=%s | candidate_id=%s "
+        "| sections=%d | characters=%d",
+        document_id,
+        candidate_id,
+        len(sections),
+        len(processed_text),
+    )
+
+    return parsed_document
+
+
+# ============================================================
+# LANGCHAIN DOCUMENT CONVERSION
+# ============================================================
+
+
+def to_langchain_documents(
+    parsed_document: ParsedDocument,
+) -> list[LangChainDocument]:
+    """
+    Convert a ParsedDocument into LangChain Document objects.
+
+    One Document is created for each detected section.
+
+    This preserves section information in metadata and allows
+    the ingestion layer to apply the configured text splitter
+    later.
+
+    If no sections are detected, the complete document is
+    returned as one LangChain Document.
+    """
+
+    documents: list[
+        LangChainDocument
+    ] = []
+
+    base_metadata = {
+        "document_id": (
+            parsed_document.document_id
+        ),
+        "document_type": (
+            parsed_document.document_type.value
+            if hasattr(
+                parsed_document.document_type,
+                "value",
+            )
+            else str(
+                parsed_document.document_type
+            )
+        ),
+        "candidate_id": (
+            parsed_document.candidate_id
+        ),
+        "candidate_name": (
+            parsed_document.candidate_name
+        ),
+        "source_file": (
+            parsed_document.source_file
+        ),
+        "document_hash": (
+            parsed_document.document_hash
+        ),
+        "page_count": (
+            parsed_document.page_count
+        ),
+    }
+
+    # --------------------------------------------------------
+    # Section-aware Documents.
+    # --------------------------------------------------------
+
+    if parsed_document.sections:
+
+        for section_name, section_text in (
+            parsed_document.sections.items()
+        ):
+
+            metadata = {
+                **base_metadata,
+                "section": section_name,
+            }
+
+            content = (
+                f"{section_name.replace('_', ' ').title()}\n"
+                f"{section_text}"
+            )
+
+            documents.append(
+                LangChainDocument(
+                    page_content=content,
+                    metadata=metadata,
+                )
+            )
+
+    # --------------------------------------------------------
+    # Fallback when no sections are detected.
+    # --------------------------------------------------------
+
+    else:
+
+        documents.append(
+            LangChainDocument(
+                page_content=(
+                    parsed_document.text
+                ),
+                metadata={
+                    **base_metadata,
+                    "section": "general",
+                },
+            )
+        )
+
+    logger.debug(
+        "Converted parsed document to LangChain "
+        "Documents | document_id=%s | documents=%d",
+        parsed_document.document_id,
+        len(documents),
+    )
 
     return documents
 
 
 # ============================================================
-# Document Chunking
+# CONVENIENCE FUNCTION
 # ============================================================
 
 
-def split_documents(
-    documents: list[Document],
-    chunk_size: int = DEFAULT_CHUNK_SIZE,
-    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-) -> list[Document]:
+def parse_to_langchain_documents(
+    file_path: str | Path,
+    document_type: DocumentType = DocumentType.RESUME,
+    document_id: Optional[str] = None,
+    document_hash: Optional[str] = None,
+) -> tuple[
+    ParsedDocument,
+    list[LangChainDocument],
+]:
     """
-    Split Documents into retrieval-friendly chunks.
+    Parse a PDF and immediately convert it to LangChain
+    Documents.
 
-    Uses RecursiveCharacterTextSplitter so that the splitter
-    attempts to preserve natural boundaries before splitting
-    smaller units.
+    Returns:
 
-    Parameters
-    ----------
-    documents:
-        Page-level LangChain Documents.
+        (
+            ParsedDocument,
+            list[LangChainDocument]
+        )
 
-    chunk_size:
-        Maximum target chunk size.
-
-    chunk_overlap:
-        Number of overlapping characters between chunks.
-
-    Returns
-    -------
-    list[Document]
-        Chunked LangChain Documents.
+    This is a convenience function for ingestion.py.
     """
 
-    if not documents:
-        raise ValueError(
-            "documents cannot be empty."
-        )
-
-    if chunk_size < 1:
-        raise ValueError(
-            "chunk_size must be >= 1."
-        )
-
-    if chunk_overlap < 0:
-        raise ValueError(
-            "chunk_overlap cannot be negative."
-        )
-
-    if chunk_overlap >= chunk_size:
-        raise ValueError(
-            "chunk_overlap must be smaller than chunk_size."
-        )
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=[
-            "\n\n",
-            "\n",
-            ". ",
-            " ",
-            "",
-        ],
-        length_function=len,
-    )
-
-    chunks = splitter.split_documents(
-        documents
-    )
-
-    # Add deterministic chunk IDs.
-    for index, chunk in enumerate(
-        chunks,
-        start=1,
-    ):
-        chunk.metadata["chunk_id"] = (
-            f"{chunk.metadata['document_id']}_chunk_{index}"
-        )
-
-        chunk.metadata["chunk_index"] = index
-
-    logger.info(
-        "Document chunking completed | "
-        "documents=%d | chunks=%d | "
-        "chunk_size=%d | overlap=%d",
-        len(documents),
-        len(chunks),
-        chunk_size,
-        chunk_overlap,
-    )
-
-    return chunks
-
-
-# ============================================================
-# Complete Parsing Pipeline
-# ============================================================
-
-
-def parse_pdf(
-    pdf_data: bytes,
-    document_id: str,
-    document_type: str,
-    source_file: str,
-    document_hash: str,
-    candidate_id: str | None = None,
-    candidate_name: str | None = None,
-    chunk_size: int = DEFAULT_CHUNK_SIZE,
-    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-) -> list[Document]:
-    """
-    Execute the complete PDF parsing pipeline.
-
-    Pipeline:
-
-        PDF bytes
-            ↓
-        Validation
-            ↓
-        Text extraction
-            ↓
-        Unicode normalization
-            ↓
-        Safe preprocessing
-            ↓
-        LangChain Documents
-            ↓
-        Recursive chunking
-            ↓
-        Chunked Documents
-
-    Parameters
-    ----------
-    pdf_data:
-        Raw PDF bytes.
-
-    document_id:
-        Unique document ID.
-
-    document_type:
-        "resume" or "jd".
-
-    source_file:
-        Original PDF filename.
-
-    document_hash:
-        SHA-256 hash of the PDF.
-
-    candidate_id:
-        Optional candidate ID.
-
-    candidate_name:
-        Optional candidate name.
-
-    chunk_size:
-        Chunk size for recursive splitting.
-
-    chunk_overlap:
-        Chunk overlap.
-
-    Returns
-    -------
-    list[Document]
-        Chunked LangChain Documents.
-    """
-
-    # --------------------------------------------------------
-    # Validate
-    # --------------------------------------------------------
-
-    validate_pdf(
-        pdf_data=pdf_data,
-        filename=source_file,
-    )
-
-    # --------------------------------------------------------
-    # Extract
-    # --------------------------------------------------------
-
-    pages = extract_pdf_text(
-        pdf_data
-    )
-
-    # --------------------------------------------------------
-    # Create LangChain Documents
-    # --------------------------------------------------------
-
-    documents = create_documents(
-        pages=pages,
-        document_id=document_id,
+    parsed_document = parse_pdf(
+        file_path=file_path,
         document_type=document_type,
-        source_file=source_file,
+        document_id=document_id,
         document_hash=document_hash,
-        candidate_id=candidate_id,
-        candidate_name=candidate_name,
     )
 
-    # --------------------------------------------------------
-    # Chunk
-    # --------------------------------------------------------
-
-    chunks = split_documents(
-        documents=documents,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
+    langchain_documents = (
+        to_langchain_documents(
+            parsed_document
+        )
     )
 
-    logger.info(
-        "PDF parsing pipeline completed | "
-        "document_id=%s | type=%s | chunks=%d",
-        document_id,
-        document_type,
-        len(chunks),
+    return (
+        parsed_document,
+        langchain_documents,
     )
 
-    return chunks
+
+# ============================================================
+# PUBLIC API
+# ============================================================
+
+
+__all__ = [
+    "ParsedDocument",
+    "extract_pdf_text",
+    "normalize_unicode",
+    "remove_control_characters",
+    "fix_pdf_artifacts",
+    "preprocess_text",
+    "normalize_section_name",
+    "is_section_heading",
+    "extract_sections",
+    "extract_candidate_name",
+    "create_document_id",
+    "create_candidate_id",
+    "parse_pdf",
+    "to_langchain_documents",
+    "parse_to_langchain_documents",
+]

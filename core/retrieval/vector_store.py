@@ -1,561 +1,1343 @@
 """
-Pinecone vector-store implementation for Kokoro AI.
+Kokoro AI - Pinecone Vector Store.
 
-Responsibilities:
-- Connect to Pinecone
-- Validate the configured index
-- Upsert document vectors
-- Perform semantic similarity search
-- Convert Pinecone results into Kokoro retrieval schemas
+Responsibilities
+----------------
+- Create/validate the Pinecone index.
+- Generate embeddings for documents and queries.
+- Upsert document chunks into Pinecone.
+- Perform semantic similarity search.
+- Apply metadata filters.
+- Delete vectors by document/candidate/JD.
+- Keep Pinecone-specific logic isolated from the rest of the application.
 
-This module does not perform:
-- BM25 search
-- Hybrid score fusion
-- Query routing
-- Gemini reranking
+Design principles
+-----------------
+- No Streamlit dependency.
+- No BM25 logic.
+- No reranking logic.
+- No generation logic.
+- Embedding provider and Pinecone client can be replaced independently.
+- All configuration comes from utils.config.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Iterable, Mapping, Protocol, Sequence
 
-from langchain_core.documents import Document
-from pinecone import Pinecone
-
-from utils.config import config
-from utils.logger import logger
-from utils.schemas import RetrievedChunk
+from utils.config import get_settings
+from utils.logger import get_logger
+from utils.schemas import RetrievalMethod, RetrievalResult
 
 
-class PineconeVectorStore:
+logger = get_logger(__name__)
+settings = get_settings()
+
+
+# ============================================================
+# Protocols
+# ============================================================
+
+
+class EmbeddingProvider(Protocol):
+    """Interface for any embedding implementation."""
+
+    def embed_documents(
+        self,
+        texts: Sequence[str],
+    ) -> list[list[float]]:
+        ...
+
+    def embed_query(
+        self,
+        text: str,
+    ) -> list[float]:
+        ...
+
+
+class VectorIndex(Protocol):
+    """Minimal interface required from a vector index."""
+
+    def upsert(
+        self,
+        vectors: Sequence[Mapping[str, Any]],
+        namespace: str = "",
+    ) -> Any:
+        ...
+
+    def query(
+        self,
+        *,
+        vector: Sequence[float],
+        top_k: int,
+        namespace: str = "",
+        filter: Mapping[str, Any] | None = None,
+        include_metadata: bool = True,
+        include_values: bool = False,
+    ) -> Any:
+        ...
+
+    def delete(
+        self,
+        *,
+        ids: Sequence[str] | None = None,
+        filter: Mapping[str, Any] | None = None,
+        namespace: str = "",
+        delete_all: bool = False,
+    ) -> Any:
+        ...
+
+    def describe_index_stats(
+        self,
+        *,
+        namespace: str | None = None,
+    ) -> Any:
+        ...
+
+
+# ============================================================
+# Data Structures
+# ============================================================
+
+
+@dataclass(slots=True)
+class VectorRecord:
     """
-    Thin application-level wrapper around Pinecone.
+    Internal representation of a vector before Pinecone upsert.
+    """
 
-    Kokoro uses this class instead of calling Pinecone directly
-    from multiple modules.
+    vector_id: str
+    values: list[float]
+    metadata: dict[str, Any]
+
+
+@dataclass(slots=True)
+class VectorSearchMatch:
+    """
+    Raw normalized Pinecone match.
+
+    This keeps Pinecone's response format away from the rest
+    of the application.
+    """
+
+    vector_id: str
+    score: float
+    metadata: dict[str, Any]
+
+
+# ============================================================
+# Google Embedding Provider
+# ============================================================
+
+
+class GoogleEmbeddingProvider:
+    """
+    Google embedding provider.
+
+    Uses the same configured embedding model for:
+        - resume chunks
+        - JD chunks
+        - recruiter queries
+
+    This is important because document and query vectors must
+    live in the same embedding space.
     """
 
     def __init__(
         self,
+        *,
+        model_name: str | None = None,
+        dimension: int | None = None,
         api_key: str | None = None,
-        index_name: str | None = None,
     ) -> None:
-        """
-        Initialize the Pinecone client and index.
 
-        Parameters
-        ----------
-        api_key:
-            Optional Pinecone API key.
+        self.model_name = (
+            model_name
+            or settings.EMBEDDING_MODEL
+        )
 
-        index_name:
-            Optional Pinecone index name.
-        """
+        self.dimension = (
+            dimension
+            or settings.EMBEDDING_DIMENSION
+        )
 
         self.api_key = (
             api_key
-            or config.PINECONE_API_KEY
+            or settings.GOOGLE_API_KEY.get_secret_value()
+            if hasattr(settings.GOOGLE_API_KEY, "get_secret_value")
+            else api_key or str(settings.GOOGLE_API_KEY)
         )
 
-        self.index_name = (
-            index_name
-            or config.PINECONE_INDEX_NAME
-        )
+        self._client: Any | None = None
 
-        if not self.api_key.strip():
+    def _get_client(self) -> Any:
+        """Create the Google GenAI client lazily."""
+
+        if self._client is not None:
+            return self._client
+
+        if not self.api_key:
             raise ValueError(
-                "PINECONE_API_KEY is not configured."
-            )
-
-        if not self.index_name.strip():
-            raise ValueError(
-                "PINECONE_INDEX_NAME cannot be empty."
-            )
-
-        # ----------------------------------------------------
-        # Create Pinecone client
-        # ----------------------------------------------------
-
-        self.client = Pinecone(
-            api_key=self.api_key
-        )
-
-        # ----------------------------------------------------
-        # Connect to index
-        # ----------------------------------------------------
-
-        self.index = self.client.Index(
-            self.index_name
-        )
-
-        logger.info(
-            "Pinecone vector store initialized | index=%s",
-            self.index_name,
-        )
-
-    # ========================================================
-    # Index Information
-    # ========================================================
-
-    def describe_index(self) -> dict[str, Any]:
-        """
-        Return Pinecone index information.
-
-        Useful for validating that the actual Pinecone
-        configuration matches Kokoro configuration.
-        """
-
-        try:
-            description = self.client.describe_index(
-                self.index_name
-            )
-
-            if hasattr(
-                description,
-                "to_dict",
-            ):
-                return description.to_dict()
-
-            if isinstance(
-                description,
-                dict,
-            ):
-                return description
-
-            return {
-                "description": str(description)
-            }
-
-        except Exception as exc:
-            logger.exception(
-                "Failed to describe Pinecone index | index=%s",
-                self.index_name,
-            )
-
-            raise RuntimeError(
-                "Unable to retrieve Pinecone index information."
-            ) from exc
-
-    # ========================================================
-    # Index Dimension Validation
-    # ========================================================
-
-    def validate_dimension(
-        self,
-        expected_dimension: int | None = None,
-    ) -> None:
-        """
-        Validate the configured Pinecone dimension against
-        the actual Pinecone index.
-
-        Parameters
-        ----------
-        expected_dimension:
-            Expected vector dimension.
-
-        Raises
-        ------
-        ValueError
-            If the dimensions do not match.
-        """
-
-        expected = (
-            expected_dimension
-            or config.PINECONE_DIMENSION
-        )
-
-        description = self.describe_index()
-
-        # Pinecone API representations can differ slightly
-        # between SDK versions, so support the common forms.
-        actual_dimension = None
-
-        if isinstance(
-            description,
-            dict,
-        ):
-            actual_dimension = description.get(
-                "dimension"
-            )
-
-            if actual_dimension is None:
-                spec = description.get(
-                    "spec",
-                    {},
-                )
-
-                if isinstance(
-                    spec,
-                    dict,
-                ):
-                    actual_dimension = spec.get(
-                        "dimension"
-                    )
-
-        if actual_dimension is None:
-            logger.warning(
-                "Could not determine Pinecone index dimension "
-                "from describe_index response."
-            )
-            return
-
-        if int(actual_dimension) != int(expected):
-            raise ValueError(
-                "Pinecone dimension mismatch. "
-                f"Configured={expected}, "
-                f"Actual={actual_dimension}."
-            )
-
-        logger.info(
-            "Pinecone dimension validated | dimension=%s",
-            actual_dimension,
-        )
-
-    # ========================================================
-    # Upsert
-    # ========================================================
-
-    def upsert_vectors(
-        self,
-        vectors: list[dict[str, Any]],
-        namespace: str = "",
-        batch_size: int = 100,
-    ) -> None:
-        """
-        Upsert vectors into Pinecone.
-
-        Each vector must follow the Pinecone structure:
-
-            {
-                "id": "...",
-                "values": [...],
-                "metadata": {...}
-            }
-
-        Parameters
-        ----------
-        vectors:
-            Vectors to insert/update.
-
-        namespace:
-            Pinecone namespace.
-
-        batch_size:
-            Number of vectors sent per request.
-        """
-
-        if not vectors:
-            logger.warning(
-                "No vectors supplied for Pinecone upsert."
-            )
-            return
-
-        if batch_size < 1:
-            raise ValueError(
-                "batch_size must be >= 1."
-            )
-
-        for start in range(
-            0,
-            len(vectors),
-            batch_size,
-        ):
-            batch = vectors[
-                start : start + batch_size
-            ]
-
-            try:
-                self.index.upsert(
-                    vectors=batch,
-                    namespace=namespace,
-                )
-
-            except Exception as exc:
-                logger.exception(
-                    "Pinecone upsert failed | "
-                    "batch_start=%d | batch_size=%d",
-                    start,
-                    len(batch),
-                )
-
-                raise RuntimeError(
-                    "Failed to upsert vectors into Pinecone."
-                ) from exc
-
-        logger.info(
-            "Pinecone upsert completed | vectors=%d",
-            len(vectors),
-        )
-
-    # ========================================================
-    # Delete
-    # ========================================================
-
-    def delete_document(
-        self,
-        document_id: str,
-        namespace: str = "",
-    ) -> None:
-        """
-        Delete all vectors belonging to a document.
-
-        Requires the vectors to contain:
-
-            metadata.document_id
-        """
-
-        if not document_id.strip():
-            raise ValueError(
-                "document_id cannot be empty."
+                "GOOGLE_API_KEY is required for embeddings."
             )
 
         try:
-            self.index.delete(
-                filter={
-                    "document_id": {
-                        "$eq": document_id
-                    }
-                },
-                namespace=namespace,
-            )
-
-        except Exception as exc:
-            logger.exception(
-                "Pinecone document deletion failed | "
-                "document_id=%s",
-                document_id,
-            )
-
+            from google import genai
+        except ImportError as exc:
             raise RuntimeError(
-                "Failed to delete document vectors."
+                "google-genai is required for Google embeddings."
             ) from exc
 
-        logger.info(
-            "Pinecone document deleted | document_id=%s",
-            document_id,
+        self._client = genai.Client(
+            api_key=self.api_key,
         )
 
-    # ========================================================
-    # Semantic Search
-    # ========================================================
+        return self._client
 
-    def search(
+    def _extract_embedding(
         self,
-        query_vector: list[float],
-        top_k: int = 5,
-        namespace: str = "",
-        filter: dict[str, Any] | None = None,
-        include_metadata: bool = True,
-    ) -> list[RetrievedChunk]:
+        response: Any,
+    ) -> list[float]:
         """
-        Perform semantic vector search.
+        Extract a single embedding vector from a GenAI response.
 
-        Parameters
-        ----------
-        query_vector:
-            Embedded query vector.
-
-        top_k:
-            Number of results.
-
-        namespace:
-            Pinecone namespace.
-
-        filter:
-            Optional Pinecone metadata filter.
-
-        include_metadata:
-            Whether metadata should be returned.
-
-        Returns
-        -------
-        list[RetrievedChunk]
-            Validated Kokoro retrieval results.
+        Handles the response shape without exposing the SDK
+        structure to the rest of Kokoro.
         """
 
-        if not query_vector:
-            raise ValueError(
-                "query_vector cannot be empty."
-            )
-
-        if top_k < 1:
-            raise ValueError(
-                "top_k must be >= 1."
-            )
-
-        try:
-            response = self.index.query(
-                vector=query_vector,
-                top_k=top_k,
-                namespace=namespace,
-                filter=filter,
-                include_metadata=include_metadata,
-            )
-
-        except Exception as exc:
-            logger.exception(
-                "Pinecone semantic search failed."
-            )
-
-            raise RuntimeError(
-                "Pinecone semantic search failed."
-            ) from exc
-
-        results: list[RetrievedChunk] = []
-
-        matches = getattr(
+        embeddings = getattr(
             response,
-            "matches",
-            [],
+            "embeddings",
+            None,
         )
 
-        for match in matches:
-
-            metadata = getattr(
-                match,
-                "metadata",
-                None,
-            ) or {}
-
-            score = getattr(
-                match,
-                "score",
-                None,
+        if embeddings is None:
+            raise RuntimeError(
+                "Embedding API returned no embeddings."
             )
 
-            chunk_id = getattr(
-                match,
-                "id",
-                None,
+        if not embeddings:
+            raise RuntimeError(
+                "Embedding API returned an empty embedding list."
             )
 
-            if not chunk_id:
-                continue
+        first = embeddings[0]
 
-            text = str(
-                metadata.get(
-                    "text",
-                    "",
-                )
-            ).strip()
-
-            if not text:
-                logger.warning(
-                    "Pinecone match missing text metadata | "
-                    "chunk_id=%s",
-                    chunk_id,
-                )
-                continue
-
-            results.append(
-                RetrievedChunk(
-                    chunk_id=str(chunk_id),
-                    candidate_id=self._optional_string(
-                        metadata.get("candidate_id")
-                    ),
-                    candidate_name=self._optional_string(
-                        metadata.get("candidate_name")
-                    ),
-                    text=text,
-                    semantic_score=(
-                        float(score)
-                        if score is not None
-                        else None
-                    ),
-                    metadata=dict(metadata),
-                )
-            )
-
-        logger.info(
-            "Pinecone semantic search completed | "
-            "requested_top_k=%d | returned=%d",
-            top_k,
-            len(results),
+        values = getattr(
+            first,
+            "values",
+            None,
         )
 
-        return results
+        if values is None and isinstance(first, Mapping):
+            values = first.get("values")
 
-    # ========================================================
-    # Document Conversion
-    # ========================================================
+        if not values:
+            raise RuntimeError(
+                "Embedding response does not contain vector values."
+            )
 
-    @staticmethod
-    def documents_to_vectors(
-        documents: list[Document],
-        embeddings: list[list[float]],
-    ) -> list[dict[str, Any]]:
+        vector = [
+            float(value)
+            for value in values
+        ]
+
+        self._validate_dimension(vector)
+
+        return vector
+
+    def _validate_dimension(
+        self,
+        vector: Sequence[float],
+    ) -> None:
         """
-        Convert LangChain Documents and embedding vectors
-        into Pinecone upsert records.
-
-        Parameters
-        ----------
-        documents:
-            Chunked LangChain Documents.
-
-        embeddings:
-            Corresponding embedding vectors.
-
-        Returns
-        -------
-        list[dict]
-            Pinecone-compatible vectors.
+        Validate embedding dimension before sending the vector
+        to Pinecone.
         """
 
-        if len(documents) != len(embeddings):
+        if len(vector) != self.dimension:
             raise ValueError(
-                "documents and embeddings must have the same length."
+                "Embedding dimension mismatch: "
+                f"expected {self.dimension}, "
+                f"received {len(vector)}."
             )
 
-        vectors: list[dict[str, Any]] = []
+    def embed_documents(
+        self,
+        texts: Sequence[str],
+    ) -> list[list[float]]:
+        """
+        Generate embeddings for multiple documents.
+        """
 
-        for document, embedding in zip(
-            documents,
-            embeddings,
-        ):
-            metadata = dict(
-                document.metadata
-            )
+        if not texts:
+            return []
 
-            chunk_id = metadata.get(
-                "chunk_id"
-            )
+        client = self._get_client()
 
-            if not chunk_id:
+        vectors: list[list[float]] = []
+
+        for text in texts:
+
+            if not text or not text.strip():
                 raise ValueError(
-                    "Every document must contain chunk_id "
-                    "before Pinecone indexing."
+                    "Cannot embed an empty document."
                 )
 
-            # Pinecone metadata must contain serializable
-            # primitive values/lists.
-            metadata["text"] = document.page_content
-
-            vectors.append(
-                {
-                    "id": str(chunk_id),
-                    "values": embedding,
-                    "metadata": metadata,
-                }
+            response = client.models.embed_content(
+                model=self.model_name,
+                contents=text,
             )
+
+            vector = self._extract_embedding(
+                response
+            )
+
+            vectors.append(vector)
 
         return vectors
 
-    # ========================================================
-    # Utility
-    # ========================================================
+    def embed_query(
+        self,
+        text: str,
+    ) -> list[float]:
+        """
+        Generate an embedding for a recruiter query.
+        """
+
+        if not text or not text.strip():
+            raise ValueError(
+                "Cannot embed an empty query."
+            )
+
+        client = self._get_client()
+
+        response = client.models.embed_content(
+            model=self.model_name,
+            contents=text,
+        )
+
+        return self._extract_embedding(
+            response
+        )
+
+
+# ============================================================
+# Pinecone Client Factory
+# ============================================================
+
+
+def _create_pinecone_client() -> Any:
+    """Create the Pinecone client lazily."""
+
+    api_key = settings.PINECONE_API_KEY
+
+    if hasattr(
+        api_key,
+        "get_secret_value",
+    ):
+        api_key = api_key.get_secret_value()
+
+    if not api_key:
+        raise ValueError(
+            "PINECONE_API_KEY is required."
+        )
+
+    try:
+        from pinecone import Pinecone
+    except ImportError as exc:
+        raise RuntimeError(
+            "pinecone package is required."
+        ) from exc
+
+    return Pinecone(
+        api_key=api_key
+    )
+
+
+# ============================================================
+# Pinecone Vector Store
+# ============================================================
+
+
+class PineconeVectorStore:
+    """
+    Pinecone-backed semantic vector store.
+
+    Main responsibilities:
+        1. Index management
+        2. Vector upsert
+        3. Semantic search
+        4. Metadata filtering
+        5. Document/candidate/JD deletion
+    """
+
+    def __init__(
+        self,
+        *,
+        embedding_provider: EmbeddingProvider | None = None,
+        pinecone_client: Any | None = None,
+        index: VectorIndex | None = None,
+        index_name: str | None = None,
+        namespace: str | None = None,
+    ) -> None:
+
+        self.index_name = (
+            index_name
+            or settings.PINECONE_INDEX_NAME
+        )
+
+        self.namespace = (
+            namespace
+            if namespace is not None
+            else getattr(
+                settings,
+                "PINECONE_NAMESPACE",
+                "",
+            )
+        )
+
+        self.embedding_provider = (
+            embedding_provider
+            or GoogleEmbeddingProvider()
+        )
+
+        self._pinecone_client = (
+            pinecone_client
+        )
+
+        self._index = index
+
+    # --------------------------------------------------------
+    # Client / Index
+    # --------------------------------------------------------
+
+    @property
+    def pinecone_client(self) -> Any:
+        """Return the lazily created Pinecone client."""
+
+        if self._pinecone_client is None:
+            self._pinecone_client = (
+                _create_pinecone_client()
+            )
+
+        return self._pinecone_client
+
+    @property
+    def index(self) -> VectorIndex:
+        """Return the Pinecone index."""
+
+        if self._index is None:
+            self._index = (
+                self.pinecone_client.Index(
+                    self.index_name
+                )
+            )
+
+        return self._index
+
+    # --------------------------------------------------------
+    # Index Management
+    # --------------------------------------------------------
+
+    def ensure_index(self) -> None:
+        """
+        Create the Pinecone index if it does not exist.
+
+        The index dimension must match the embedding dimension.
+        """
+
+        existing_indexes = (
+            self.pinecone_client.list_indexes()
+        )
+
+        names: set[str] = set()
+
+        if hasattr(
+            existing_indexes,
+            "names",
+        ):
+            names = set(
+                existing_indexes.names()
+            )
+
+        elif isinstance(
+            existing_indexes,
+            Iterable,
+        ):
+            for item in existing_indexes:
+
+                if isinstance(
+                    item,
+                    Mapping,
+                ):
+                    name = item.get("name")
+                else:
+                    name = getattr(
+                        item,
+                        "name",
+                        None,
+                    )
+
+                if name:
+                    names.add(name)
+
+        if self.index_name in names:
+            logger.info(
+                "Pinecone index already exists: %s",
+                self.index_name,
+            )
+            return
+
+        try:
+            from pinecone import ServerlessSpec
+        except ImportError as exc:
+            raise RuntimeError(
+                "pinecone package is required."
+            ) from exc
+
+        cloud = getattr(
+            settings,
+            "PINECONE_CLOUD",
+            "aws",
+        )
+
+        region = getattr(
+            settings,
+            "PINECONE_REGION",
+            "us-east-1",
+        )
+
+        self.pinecone_client.create_index(
+            name=self.index_name,
+            dimension=settings.PINECONE_DIMENSION,
+            metric=settings.PINECONE_METRIC,
+            spec=ServerlessSpec(
+                cloud=cloud,
+                region=region,
+            ),
+        )
+
+        logger.info(
+            "Created Pinecone index: %s",
+            self.index_name,
+        )
+
+        self._index = (
+            self.pinecone_client.Index(
+                self.index_name
+            )
+        )
+
+    # --------------------------------------------------------
+    # Metadata
+    # --------------------------------------------------------
 
     @staticmethod
-    def _optional_string(
+    def _to_plain_value(
         value: Any,
-    ) -> str | None:
+    ) -> Any:
         """
-        Safely convert optional metadata to string.
+        Convert common Python/Pydantic values into Pinecone-safe
+        metadata values.
         """
 
         if value is None:
             return None
 
-        value = str(value).strip()
+        if isinstance(
+            value,
+            (
+                str,
+                int,
+                float,
+                bool,
+            ),
+        ):
+            return value
 
-        return value or None
+        if isinstance(
+            value,
+            (
+                list,
+                tuple,
+            ),
+        ):
+            return [
+                PineconeVectorStore._to_plain_value(
+                    item
+                )
+                for item in value
+                if item is not None
+            ]
+
+        if isinstance(
+            value,
+            Mapping,
+        ):
+            return {
+                str(key): PineconeVectorStore._to_plain_value(
+                    item
+                )
+                for key, item in value.items()
+                if item is not None
+            }
+
+        if hasattr(
+            value,
+            "value",
+        ):
+            return value.value
+
+        return str(value)
+
+    @classmethod
+    def _clean_metadata(
+        cls,
+        metadata: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Convert metadata into Pinecone-compatible values."""
+
+        if not metadata:
+            return {}
+
+        cleaned: dict[str, Any] = {}
+
+        for key, value in metadata.items():
+
+            if value is None:
+                continue
+
+            cleaned[str(key)] = (
+                cls._to_plain_value(value)
+            )
+
+        return cleaned
+
+    # --------------------------------------------------------
+    # Chunk Helpers
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _get_value(
+        obj: Any,
+        key: str,
+        default: Any = None,
+    ) -> Any:
+
+        if isinstance(
+            obj,
+            Mapping,
+        ):
+            return obj.get(
+                key,
+                default,
+            )
+
+        return getattr(
+            obj,
+            key,
+            default,
+        )
+
+    @classmethod
+    def _chunk_to_record(
+        cls,
+        chunk: Any,
+        vector: Sequence[float],
+    ) -> VectorRecord:
+        """
+        Convert a DocumentChunk/Pydantic model/dict into an
+        internal vector record.
+        """
+
+        vector_id = (
+            cls._get_value(
+                chunk,
+                "chunk_id",
+            )
+            or cls._get_value(
+                chunk,
+                "id",
+            )
+        )
+
+        if not vector_id:
+            raise ValueError(
+                "Chunk is missing chunk_id."
+            )
+
+        content = (
+            cls._get_value(
+                chunk,
+                "content",
+            )
+            or cls._get_value(
+                chunk,
+                "text",
+            )
+            or ""
+        )
+
+        metadata = (
+            cls._get_value(
+                chunk,
+                "metadata",
+                {},
+            )
+            or {}
+        )
+
+        if hasattr(
+            metadata,
+            "model_dump",
+        ):
+            metadata = metadata.model_dump()
+
+        metadata = dict(metadata)
+
+        # Preserve important retrieval metadata explicitly.
+        for key in (
+            "chunk_id",
+            "document_id",
+            "candidate_id",
+            "jd_id",
+            "document_type",
+            "candidate_name",
+            "source",
+            "page",
+            "section",
+            "chunk_index",
+        ):
+            value = cls._get_value(
+                chunk,
+                key,
+            )
+
+            if value is not None:
+                metadata.setdefault(
+                    key,
+                    value,
+                )
+
+        metadata.setdefault(
+            "text",
+            content,
+        )
+
+        return VectorRecord(
+            vector_id=str(vector_id),
+            values=[
+                float(value)
+                for value in vector
+            ],
+            metadata=cls._clean_metadata(
+                metadata
+            ),
+        )
+
+    # --------------------------------------------------------
+    # Upsert
+    # --------------------------------------------------------
+
+    def upsert_chunks(
+        self,
+        chunks: Sequence[Any],
+        *,
+        batch_size: int = 100,
+    ) -> int:
+        """
+        Embed and upsert document chunks into Pinecone.
+
+        Existing vector IDs are overwritten, which makes ingestion
+        idempotent for the same chunk IDs.
+        """
+
+        if not chunks:
+            return 0
+
+        texts = []
+
+        for chunk in chunks:
+
+            text = (
+                self._get_value(
+                    chunk,
+                    "content",
+                )
+                or self._get_value(
+                    chunk,
+                    "text",
+                )
+                or ""
+            )
+
+            if not text.strip():
+                raise ValueError(
+                    "Cannot index an empty chunk."
+                )
+
+            texts.append(text)
+
+        logger.info(
+            "Generating embeddings for %d chunks.",
+            len(texts),
+        )
+
+        embeddings = (
+            self.embedding_provider.embed_documents(
+                texts
+            )
+        )
+
+        if len(embeddings) != len(chunks):
+            raise RuntimeError(
+                "Embedding count does not match chunk count."
+            )
+
+        records = [
+            self._chunk_to_record(
+                chunk,
+                vector,
+            )
+            for chunk, vector in zip(
+                chunks,
+                embeddings,
+            )
+        ]
+
+        total_upserted = 0
+
+        for start in range(
+            0,
+            len(records),
+            batch_size,
+        ):
+            batch = records[
+                start : start + batch_size
+            ]
+
+            payload = [
+                {
+                    "id": record.vector_id,
+                    "values": record.values,
+                    "metadata": record.metadata,
+                }
+                for record in batch
+            ]
+
+            self.index.upsert(
+                vectors=payload,
+                namespace=self.namespace,
+            )
+
+            total_upserted += len(batch)
+
+            logger.debug(
+                "Upserted Pinecone batch: %d vectors.",
+                len(batch),
+            )
+
+        logger.info(
+            "Pinecone upsert completed: %d vectors.",
+            total_upserted,
+        )
+
+        return total_upserted
+
+    # --------------------------------------------------------
+    # Query
+    # --------------------------------------------------------
+
+    def _build_filter(
+        self,
+        filters: Any | None,
+    ) -> dict[str, Any] | None:
+        """
+        Convert SearchFilters into Pinecone metadata filters.
+
+        Only filters explicitly provided by the caller are sent
+        to Pinecone.
+        """
+
+        if filters is None:
+            return None
+
+        if hasattr(
+            filters,
+            "model_dump",
+        ):
+            raw = filters.model_dump(
+                exclude_none=True
+            )
+        elif isinstance(
+            filters,
+            Mapping,
+        ):
+            raw = dict(filters)
+        else:
+            raw = {
+                key: value
+                for key, value in vars(
+                    filters
+                ).items()
+                if value is not None
+            }
+
+        pinecone_filter: dict[str, Any] = {}
+
+        direct_fields = (
+            "document_type",
+            "candidate_id",
+            "jd_id",
+            "location",
+            "education",
+        )
+
+        for field in direct_fields:
+
+            value = raw.get(field)
+
+            if value is None:
+                continue
+
+            if isinstance(
+                value,
+                (list, tuple, set),
+            ):
+                pinecone_filter[field] = {
+                    "$in": list(value)
+                }
+            else:
+                if hasattr(
+                    value,
+                    "value",
+                ):
+                    value = value.value
+
+                pinecone_filter[field] = value
+
+        candidate_ids = raw.get(
+            "candidate_ids"
+        )
+
+        if candidate_ids:
+            pinecone_filter[
+                "candidate_id"
+            ] = {
+                "$in": list(candidate_ids)
+            }
+
+        skills = raw.get("skills")
+
+        if skills:
+            pinecone_filter[
+                "skills"
+            ] = {
+                "$in": list(skills)
+            }
+
+        min_experience = raw.get(
+            "min_experience"
+        )
+
+        if min_experience is not None:
+            pinecone_filter[
+                "experience_years"
+            ] = {
+                "$gte": min_experience
+            }
+
+        max_experience = raw.get(
+            "max_experience"
+        )
+
+        if max_experience is not None:
+
+            existing = pinecone_filter.get(
+                "experience_years",
+                {},
+            )
+
+            existing[
+                "$lte"
+            ] = max_experience
+
+            pinecone_filter[
+                "experience_years"
+            ] = existing
+
+        return (
+            pinecone_filter
+            if pinecone_filter
+            else None
+        )
+
+    def _parse_matches(
+        self,
+        response: Any,
+    ) -> list[VectorSearchMatch]:
+        """Normalize a Pinecone query response."""
+
+        matches = getattr(
+            response,
+            "matches",
+            None,
+        )
+
+        if matches is None and isinstance(
+            response,
+            Mapping,
+        ):
+            matches = response.get(
+                "matches",
+                [],
+            )
+
+        matches = matches or []
+
+        results: list[
+            VectorSearchMatch
+        ] = []
+
+        for match in matches:
+
+            if isinstance(
+                match,
+                Mapping,
+            ):
+                vector_id = match.get(
+                    "id"
+                )
+                score = match.get(
+                    "score",
+                    0.0,
+                )
+                metadata = (
+                    match.get(
+                        "metadata"
+                    )
+                    or {}
+                )
+
+            else:
+                vector_id = getattr(
+                    match,
+                    "id",
+                    None,
+                )
+                score = getattr(
+                    match,
+                    "score",
+                    0.0,
+                )
+                metadata = (
+                    getattr(
+                        match,
+                        "metadata",
+                        None,
+                    )
+                    or {}
+                )
+
+            if not vector_id:
+                continue
+
+            results.append(
+                VectorSearchMatch(
+                    vector_id=str(
+                        vector_id
+                    ),
+                    score=float(
+                        score or 0.0
+                    ),
+                    metadata=dict(
+                        metadata
+                    ),
+                )
+            )
+
+        return results
+
+    # --------------------------------------------------------
+    # RetrievalResult Conversion
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _build_retrieval_result(
+        match: VectorSearchMatch,
+    ) -> RetrievalResult:
+        """
+        Convert a Pinecone match into the application's
+        RetrievalResult contract.
+
+        model_validate is used so the retrieval layer remains
+        compatible with the Pydantic schema without duplicating
+        the schema definition here.
+        """
+
+        metadata = dict(
+            match.metadata
+        )
+
+        payload: dict[str, Any] = {
+            "chunk_id": (
+                metadata.get(
+                    "chunk_id"
+                )
+                or match.vector_id
+            ),
+            "document_id": metadata.get(
+                "document_id"
+            ),
+            "candidate_id": metadata.get(
+                "candidate_id"
+            ),
+            "score": match.score,
+            "content": (
+                metadata.get(
+                    "text"
+                )
+                or metadata.get(
+                    "content"
+                )
+                or ""
+            ),
+            "metadata": metadata,
+            "retrieval_method": (
+                RetrievalMethod.DENSE
+            ),
+        }
+
+        # Pydantic v2.
+        if hasattr(
+            RetrievalResult,
+            "model_validate",
+        ):
+            return RetrievalResult.model_validate(
+                payload
+            )
+
+        # Defensive compatibility for Pydantic v1.
+        return RetrievalResult.parse_obj(
+            payload
+        )
+
+    # --------------------------------------------------------
+    # Semantic Search
+    # --------------------------------------------------------
+
+    def similarity_search(
+        self,
+        query: str,
+        *,
+        top_k: int | None = None,
+        filters: Any | None = None,
+    ) -> list[RetrievalResult]:
+        """
+        Perform semantic similarity search.
+
+        Flow:
+
+            recruiter query
+                    ↓
+              query embedding
+                    ↓
+                Pinecone
+                    ↓
+              top-k matches
+                    ↓
+             RetrievalResult
+        """
+
+        if not query or not query.strip():
+            return []
+
+        k = (
+            top_k
+            if top_k is not None
+            else settings.VECTOR_TOP_K
+        )
+
+        if k <= 0:
+            raise ValueError(
+                "top_k must be greater than zero."
+            )
+
+        query_vector = (
+            self.embedding_provider.embed_query(
+                query
+            )
+        )
+
+        pinecone_filter = (
+            self._build_filter(
+                filters
+            )
+        )
+
+        response = self.index.query(
+            vector=query_vector,
+            top_k=k,
+            namespace=self.namespace,
+            filter=pinecone_filter,
+            include_metadata=True,
+            include_values=False,
+        )
+
+        matches = self._parse_matches(
+            response
+        )
+
+        results = [
+            self._build_retrieval_result(
+                match
+            )
+            for match in matches
+        ]
+
+        logger.info(
+            "Semantic search completed: query=%s results=%d top_k=%d",
+            query[:100],
+            len(results),
+            k,
+        )
+
+        return results
+
+    # --------------------------------------------------------
+    # Deletion
+    # --------------------------------------------------------
+
+    def delete_vectors(
+        self,
+        vector_ids: Sequence[str],
+    ) -> None:
+        """Delete vectors by their Pinecone IDs."""
+
+        if not vector_ids:
+            return
+
+        self.index.delete(
+            ids=list(vector_ids),
+            namespace=self.namespace,
+        )
+
+        logger.info(
+            "Deleted %d Pinecone vectors.",
+            len(vector_ids),
+        )
+
+    def delete_by_document_id(
+        self,
+        document_id: str,
+    ) -> None:
+        """Delete all vectors belonging to a document."""
+
+        if not document_id:
+            return
+
+        self.index.delete(
+            filter={
+                "document_id": document_id
+            },
+            namespace=self.namespace,
+        )
+
+        logger.info(
+            "Deleted vectors for document_id=%s",
+            document_id,
+        )
+
+    def delete_by_candidate_id(
+        self,
+        candidate_id: str,
+    ) -> None:
+        """Delete all vectors belonging to a candidate."""
+
+        if not candidate_id:
+            return
+
+        self.index.delete(
+            filter={
+                "candidate_id": candidate_id
+            },
+            namespace=self.namespace,
+        )
+
+        logger.info(
+            "Deleted vectors for candidate_id=%s",
+            candidate_id,
+        )
+
+    def delete_by_jd_id(
+        self,
+        jd_id: str,
+    ) -> None:
+        """Delete all vectors belonging to a JD."""
+
+        if not jd_id:
+            return
+
+        self.index.delete(
+            filter={
+                "jd_id": jd_id
+            },
+            namespace=self.namespace,
+        )
+
+        logger.info(
+            "Deleted vectors for jd_id=%s",
+            jd_id,
+        )
+
+    # --------------------------------------------------------
+    # Statistics
+    # --------------------------------------------------------
+
+    def stats(self) -> Any:
+        """Return Pinecone index statistics."""
+
+        return self.index.describe_index_stats(
+            namespace=self.namespace
+        )
+
+
+# ============================================================
+# Factory
+# ============================================================
+
+
+def create_vector_store(
+    *,
+    embedding_provider: EmbeddingProvider | None = None,
+    pinecone_client: Any | None = None,
+    index: VectorIndex | None = None,
+) -> PineconeVectorStore:
+    """
+    Factory for the application vector store.
+
+    Dependencies can be injected for:
+        - unit tests
+        - local mocks
+        - alternative embedding providers
+        - alternative vector databases
+    """
+
+    return PineconeVectorStore(
+        embedding_provider=embedding_provider,
+        pinecone_client=pinecone_client,
+        index=index,
+    )
+
+
+__all__ = [
+    "EmbeddingProvider",
+    "VectorIndex",
+    "VectorRecord",
+    "VectorSearchMatch",
+    "GoogleEmbeddingProvider",
+    "PineconeVectorStore",
+    "create_vector_store",
+]
