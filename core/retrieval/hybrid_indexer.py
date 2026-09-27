@@ -15,22 +15,22 @@ Architecture
 ------------
                     Query
                       |
-             +--------+--------+
-             |                 |
-             v                 v
-         Pinecone             BM25
-         Semantic            Keyword
-         Search              Search
-             |                 |
-             +--------+--------+
+              +--------+--------+
+              |                 |
+              v                 v
+          Pinecone             BM25
+          Semantic            Keyword
+          Search              Search
+              |                 |
+              +--------+--------+
                       |
-                Score Normalize
+                 Score Normalize
                       |
-                Weighted Fusion
+                 Weighted Fusion
                       |
-                 Hybrid Top-K
+                  Hybrid Top-K
                       |
-                  Reranker
+                   Reranker
 
 Important
 ---------
@@ -55,7 +55,6 @@ from typing import Any, Mapping, Protocol, Sequence
 from utils.config import get_settings
 from utils.logger import get_logger
 from utils.schemas import RetrievalMethod, RetrievalResult
-from utils.utils import normalize_score
 
 
 logger = get_logger(__name__)
@@ -245,6 +244,7 @@ class BM25Backend:
                 )
 
             else:
+
                 if current:
                     tokens.append(
                         "".join(current)
@@ -949,8 +949,9 @@ class HybridIndexer:
             else semantic_weight
         )
 
+        # Current configuration uses LEXICAL_WEIGHT.
         self.keyword_weight = (
-            settings.KEYWORD_WEIGHT
+            settings.LEXICAL_WEIGHT
             if keyword_weight is None
             else keyword_weight
         )
@@ -1496,51 +1497,54 @@ class HybridIndexer:
               +----> BM25 lexical retrieval
               |
               v
-         Normalize scores
+          Normalize scores
               |
               v
-         Weighted fusion
+          Weighted fusion
               |
               v
-          Hybrid Top-K
+           Hybrid Top-K
         """
 
         if not query or not query.strip():
             return []
 
+        # Current configuration:
+        # VECTOR_TOP_K = 15
+        # BM25_TOP_K = 15
+        # HYBRID_TOP_K = 10
+
         final_top_k = (
             top_k
             if top_k is not None
-            else getattr(
-                settings,
-                "HYBRID_TOP_K",
-                settings.RETRIEVAL_TOP_K,
-            )
+            else settings.HYBRID_TOP_K
         )
 
         semantic_k = (
             semantic_top_k
             if semantic_top_k is not None
-            else getattr(
-                settings,
-                "VECTOR_TOP_K",
-                final_top_k,
-            )
+            else settings.VECTOR_TOP_K
         )
 
         keyword_k = (
             keyword_top_k
             if keyword_top_k is not None
-            else getattr(
-                settings,
-                "BM25_TOP_K",
-                final_top_k,
-            )
+            else settings.BM25_TOP_K
         )
 
         if final_top_k <= 0:
             raise ValueError(
                 "top_k must be greater than zero."
+            )
+
+        if semantic_k <= 0:
+            raise ValueError(
+                "semantic_top_k must be greater than zero."
+            )
+
+        if keyword_k <= 0:
+            raise ValueError(
+                "keyword_top_k must be greater than zero."
             )
 
         filter_mapping = (
@@ -1550,7 +1554,8 @@ class HybridIndexer:
         )
 
         logger.info(
-            "Starting hybrid search: top_k=%d semantic_k=%d keyword_k=%d",
+            "Starting hybrid search: "
+            "top_k=%d semantic_k=%d keyword_k=%d",
             final_top_k,
             semantic_k,
             keyword_k,

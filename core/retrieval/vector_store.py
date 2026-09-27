@@ -133,16 +133,27 @@ class VectorSearchMatch:
 
 class GoogleEmbeddingProvider:
     """
-    Google embedding provider.
+    Google Gemini embedding provider.
 
-    Uses the same configured embedding model for:
+    Uses the same embedding model for:
         - resume chunks
         - JD chunks
         - recruiter queries
 
-    This is important because document and query vectors must
-    live in the same embedding space.
+    Configuration:
+        model = gemini-embedding-001
+        dimension = 768
+
+    Task types:
+        - documents/JDs -> RETRIEVAL_DOCUMENT
+        - recruiter query -> RETRIEVAL_QUERY
+
+    This ensures document and query vectors are generated
+    in the same embedding space.
     """
+
+    DOCUMENT_TASK_TYPE = "RETRIEVAL_DOCUMENT"
+    QUERY_TASK_TYPE = "RETRIEVAL_QUERY"
 
     def __init__(
         self,
@@ -268,7 +279,11 @@ class GoogleEmbeddingProvider:
         texts: Sequence[str],
     ) -> list[list[float]]:
         """
-        Generate embeddings for multiple documents.
+        Generate embeddings for resume/JD document chunks.
+
+        Uses:
+            task_type = RETRIEVAL_DOCUMENT
+            output_dimensionality = 768
         """
 
         if not texts:
@@ -288,6 +303,10 @@ class GoogleEmbeddingProvider:
             response = client.models.embed_content(
                 model=self.model_name,
                 contents=text,
+                config={
+                    "task_type": self.DOCUMENT_TASK_TYPE,
+                    "output_dimensionality": self.dimension,
+                },
             )
 
             vector = self._extract_embedding(
@@ -304,6 +323,10 @@ class GoogleEmbeddingProvider:
     ) -> list[float]:
         """
         Generate an embedding for a recruiter query.
+
+        Uses:
+            task_type = RETRIEVAL_QUERY
+            output_dimensionality = 768
         """
 
         if not text or not text.strip():
@@ -316,6 +339,10 @@ class GoogleEmbeddingProvider:
         response = client.models.embed_content(
             model=self.model_name,
             contents=text,
+            config={
+                "task_type": self.QUERY_TASK_TYPE,
+                "output_dimensionality": self.dimension,
+            },
         )
 
         return self._extract_embedding(
@@ -352,7 +379,7 @@ def _create_pinecone_client() -> Any:
         ) from exc
 
     return Pinecone(
-        api_key=api_key
+        api_key=api_key,
     )
 
 
@@ -1144,11 +1171,11 @@ class PineconeVectorStore:
                     ↓
               query embedding
                     ↓
-                Pinecone
+                 Pinecone
                     ↓
-              top-k matches
+                top-k matches
                     ↓
-             RetrievalResult
+              RetrievalResult
         """
 
         if not query or not query.strip():

@@ -106,7 +106,7 @@ class GeminiReranker:
 
         self.model = (
             model
-            or settings.GEMINI_MODEL
+            or settings.LLM_MODEL
         )
 
         self.max_retries = (

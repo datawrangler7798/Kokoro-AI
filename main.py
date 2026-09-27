@@ -141,12 +141,12 @@ def run_streamlit() -> None:
     """
     Start the Streamlit application.
 
-    Streamlit normally executes streamlit/app.py directly.
+    Streamlit normally executes app.py directly.
     This function is provided as a convenience entry point.
     """
 
     try:
-        from streamlit.app import main as streamlit_main
+        from ui.app import main as streamlit_main
 
     except ImportError as exc:
 

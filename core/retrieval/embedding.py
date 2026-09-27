@@ -1,12 +1,15 @@
 """
+core/retrieval/embedding.py
+
 Kokoro - Gemini Embedding Service.
 
 Responsibilities:
     - Generate embeddings using Gemini Embedding API.
-    - Use the same embedding model for documents and queries.
+    - Use gemini-embedding-001 for documents and queries.
     - Use task-specific configuration:
         * RETRIEVAL_DOCUMENT for resume/JD chunks
         * RETRIEVAL_QUERY for recruiter queries
+    - Generate 768-dimensional embeddings.
     - Batch document embedding requests.
     - Validate embedding dimensions.
     - Apply rate limiting.
@@ -37,6 +40,12 @@ from utils.utils import RateLimiter
 # Constants
 # ============================================================
 
+EMBEDDING_MODEL = "gemini-embedding-001"
+EMBEDDING_DIMENSION = 768
+
+DOCUMENT_TASK_TYPE = "RETRIEVAL_DOCUMENT"
+QUERY_TASK_TYPE = "RETRIEVAL_QUERY"
+
 DEFAULT_BATCH_SIZE = 100
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY_SECONDS = 1.0
@@ -52,10 +61,17 @@ class GeminiEmbeddingService:
     """
     Production wrapper around the Gemini Embedding API.
 
-    The service creates one Google GenAI client and reuses it.
+    Model:
+        gemini-embedding-001
 
-    Document embeddings and query embeddings use the same model
-    but different task types.
+    Dimension:
+        768
+
+    Document embeddings:
+        RETRIEVAL_DOCUMENT
+
+    Query embeddings:
+        RETRIEVAL_QUERY
     """
 
     def __init__(
@@ -68,15 +84,47 @@ class GeminiEmbeddingService:
 
         self.config = get_settings()
 
+        # --------------------------------------------------------
+        # Embedding model
+        # --------------------------------------------------------
+        #
+        # Kokoro uses one embedding model everywhere.
+        #
+        # Documents and queries must remain in the same
+        # embedding space.
+        #
+
         self.model_name = (
             model_name
             or self.config.EMBEDDING_MODEL
         )
 
+        # --------------------------------------------------------
+        # Embedding dimension
+        # --------------------------------------------------------
+
         self.dimension = (
             dimension
             or self.config.EMBEDDING_DIMENSION
         )
+
+        # --------------------------------------------------------
+        # Validate Kokoro embedding configuration
+        # --------------------------------------------------------
+
+        if self.model_name != EMBEDDING_MODEL:
+            raise ValueError(
+                "Kokoro requires the embedding model "
+                f"'{EMBEDDING_MODEL}'. "
+                f"Received '{self.model_name}'."
+            )
+
+        if self.dimension != EMBEDDING_DIMENSION:
+            raise ValueError(
+                "Kokoro requires embedding dimension "
+                f"{EMBEDDING_DIMENSION}. "
+                f"Received {self.dimension}."
+            )
 
         if batch_size <= 0:
             raise ValueError(
@@ -116,9 +164,16 @@ class GeminiEmbeddingService:
                 )
 
             self._client = genai.Client(
-                api_key=self.config.GOOGLE_API_KEY.get_secret_value()
-                if hasattr(self.config.GOOGLE_API_KEY, "get_secret_value")
-                else str(self.config.GOOGLE_API_KEY)
+                api_key=(
+                    self.config.GOOGLE_API_KEY.get_secret_value()
+                    if hasattr(
+                        self.config.GOOGLE_API_KEY,
+                        "get_secret_value",
+                    )
+                    else str(
+                        self.config.GOOGLE_API_KEY
+                    )
+                )
             )
 
         return self._client
@@ -177,7 +232,7 @@ class GeminiEmbeddingService:
                 Texts to embed.
 
             task_type:
-                Gemini embedding task type.
+                RETRIEVAL_DOCUMENT or RETRIEVAL_QUERY.
 
         Returns:
             List of embedding vectors.
@@ -186,11 +241,22 @@ class GeminiEmbeddingService:
         if not texts:
             return []
 
+        if task_type not in {
+            DOCUMENT_TASK_TYPE,
+            QUERY_TASK_TYPE,
+        }:
+            raise ValueError(
+                "Unsupported Gemini embedding task type: "
+                f"{task_type}"
+            )
+
         client = self._get_client()
 
         last_exception: Exception | None = None
 
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(
+            self.max_retries + 1
+        ):
 
             try:
 
@@ -251,7 +317,7 @@ class GeminiEmbeddingService:
 
                 delay = min(
                     INITIAL_RETRY_DELAY_SECONDS
-                    * (2 ** attempt),
+                    * (2**attempt),
                     MAX_RETRY_DELAY_SECONDS,
                 )
 
@@ -279,17 +345,14 @@ class GeminiEmbeddingService:
         texts: Sequence[str],
     ) -> list[list[float]]:
         """
-        Generate embeddings for arbitrary document text.
+        Generate embeddings for document text.
 
-        This method uses RETRIEVAL_DOCUMENT and is intended for
-        resume/JD chunks.
+        Intended for:
+            - Resume chunks
+            - JD chunks
 
-        Args:
-            texts:
-                Texts to embed.
-
-        Returns:
-            List of configured-dimensional vectors.
+        Uses:
+            RETRIEVAL_DOCUMENT
         """
 
         if not texts:
@@ -327,12 +390,14 @@ class GeminiEmbeddingService:
 
             embeddings = self._embed_batch(
                 batch,
-                task_type="RETRIEVAL_DOCUMENT",
+                task_type=DOCUMENT_TASK_TYPE,
             )
 
             all_embeddings.extend(embeddings)
 
-        if len(all_embeddings) != len(normalized_texts):
+        if len(all_embeddings) != len(
+            normalized_texts
+        ):
             raise RuntimeError(
                 "Final embedding count does not match "
                 "input count."
@@ -351,8 +416,8 @@ class GeminiEmbeddingService:
         """
         Generate embeddings for LangChain Documents.
 
-        The page/chunk metadata is not embedded; only
-        page_content is sent to Gemini.
+        Only page_content is embedded.
+        Metadata is not embedded.
         """
 
         if not documents:
@@ -376,10 +441,12 @@ class GeminiEmbeddingService:
         """
         Generate an embedding for a recruiter query.
 
-        Uses RETRIEVAL_QUERY.
+        Uses:
+            RETRIEVAL_QUERY
 
-        The query uses the same embedding model and
-        dimensionality as the indexed documents.
+        Uses the same:
+            gemini-embedding-001
+            768-dimensional vector space
         """
 
         if not isinstance(query, str):
@@ -396,7 +463,7 @@ class GeminiEmbeddingService:
 
         embeddings = self._embed_batch(
             [query],
-            task_type="RETRIEVAL_QUERY",
+            task_type=QUERY_TASK_TYPE,
         )
 
         if len(embeddings) != 1:
@@ -438,12 +505,6 @@ class GeminiEmbeddingService:
         """
         Verify that the embedding service can successfully
         generate an embedding.
-
-        Returns:
-            True if successful.
-
-        Raises:
-            Exception if the embedding request fails.
         """
 
         vector = self.embed_query(

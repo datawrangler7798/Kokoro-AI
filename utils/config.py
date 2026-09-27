@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     # Gemini 3.6 Flash is used for:
     #   1. Candidate reranking
     #   2. Final response generation
+
     LLM_MODEL: str = "gemini-3.6-flash"
 
     LLM_TEMPERATURE: float = 0.0
@@ -81,10 +82,16 @@ class Settings(BaseSettings):
     #
     # Both must use the same embedding space.
 
-    EMBEDDING_MODEL: str = "models/embedding-001"
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
 
-    # Must match the dimension produced by the embedding model
-    # and the Pinecone index.
+    # Gemini Embedding 001 supports configurable output
+    # dimensionality.
+    #
+    # Kokoro uses 768 dimensions.
+    #
+    # This must match the dimension produced by the embedding
+    # service and the Pinecone index.
+
     EMBEDDING_DIMENSION: int = 768
 
     # ============================================================
@@ -251,6 +258,7 @@ class Settings(BaseSettings):
     #
     # Stored as comma-separated values because environment
     # variables are strings.
+
     EVALUATION_K_VALUES: str = "1,3,5,10"
 
     # ============================================================
@@ -634,4 +642,4 @@ def get_settings() -> Settings:
 
 
 # Global settings object used throughout the application.
-settings = get_settings() 
+settings = get_settings()

@@ -293,11 +293,11 @@ class IngestionService:
 
         if document_type == DocumentType.RESUME:
             return Path(
-                settings.RESUMES_DIRECTORY
+                settings.RESUME_DIRECTORY
             )
 
         return Path(
-            settings.JDS_DIRECTORY
+            settings.JD_DIRECTORY
         )
 
     def save_file(
