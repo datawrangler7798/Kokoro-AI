@@ -1,0 +1,18 @@
+python-dotenv>=1.0
+pydantic[email]>=2.7,<3
+pydantic-settings>=2.3
+
+langchain-core>=1.0,<2
+langchain-classic>=1.0
+langchain-text-splitters>=1.0
+langchain-google-genai>=3.0
+
+# Keep below 0.4 for the current RAGAS compatibility baseline.
+langchain-community>=0.3,<0.4
+
+pinecone>=7.0
+pypdf>=5.0
+rank-bm25>=0.2.2
+pandas>=2.0
+streamlit>=1.40
+ragas>=0.4,<0.5

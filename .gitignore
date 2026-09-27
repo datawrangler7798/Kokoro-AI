@@ -1,4 +1,31 @@
-.venv/
+# Environment / secrets
 .env
+.streamlit/secrets.toml
+
+# Python
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+logs/
+*.log
+
+# Local candidate documents
+data/resumes/*
+data/jds/*
+
+# OS
+.DS_Store
+Thumbs.db
