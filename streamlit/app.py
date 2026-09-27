@@ -14,6 +14,33 @@ interfaces and should not contain retrieval or LLM business logic.
 
 from __future__ import annotations
 
+# ============================================================
+# PROJECT ROOT / IMPORT PATH
+# ============================================================
+
+import sys
+from pathlib import Path
+
+# app.py is inside:
+# Kokoro-AI/streamlit/app.py
+#
+# parents[1] points to:
+# Kokoro-AI/
+#
+# Adding the project root allows imports such as:
+# from core...
+# from utils...
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# ============================================================
+# IMPORTS
+# ============================================================
+
 import uuid
 from typing import Any
 
