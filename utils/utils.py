@@ -28,11 +28,57 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
+import time
 import uuid
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Iterator
+
+
+class RateLimiter:
+    """Thread-safe sliding-window limiter for provider requests."""
+
+    def __init__(self, max_calls: int, window_seconds: float = 60.0) -> None:
+        if max_calls <= 0 or window_seconds <= 0:
+            raise ValueError("Rate limit and window must be positive.")
+        self.max_calls = max_calls
+        self.window_seconds = window_seconds
+        self._calls: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._calls and now - self._calls[0] >= self.window_seconds:
+                    self._calls.popleft()
+                if len(self._calls) < self.max_calls:
+                    self._calls.append(now)
+                    return
+                wait_for = self.window_seconds - (now - self._calls[0])
+            time.sleep(max(0.01, wait_for))
+
+
+_llm_rate_limiter: RateLimiter | None = None
+_llm_rate_limiter_lock = threading.Lock()
+
+
+def get_llm_rate_limiter() -> RateLimiter:
+    """Return the shared Gemini request limiter."""
+    global _llm_rate_limiter
+    if _llm_rate_limiter is None:
+        with _llm_rate_limiter_lock:
+            if _llm_rate_limiter is None:
+                from utils.config import get_settings
+
+                _llm_rate_limiter = RateLimiter(
+                    max_calls=get_settings().LLM_REQUESTS_PER_MINUTE,
+                    window_seconds=60.0,
+                )
+    return _llm_rate_limiter
 
 
 # ============================================================

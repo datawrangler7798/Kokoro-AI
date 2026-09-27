@@ -67,6 +67,7 @@ from pydantic import ValidationError
 
 from utils.config import settings
 from utils.logger import get_logger
+from utils.utils import get_llm_rate_limiter
 from utils.schemas import (
     RerankResult,
     RetrievalResult,
@@ -199,7 +200,11 @@ class GeminiReranker:
         # Sort again defensively by retrieval score.
         sorted_results = sorted(
             results,
-            key=lambda result: result.score,
+            key=lambda result: getattr(
+                result,
+                "score",
+                getattr(result, "raw_score", 0.0),
+            ),
             reverse=True,
         )
 
@@ -240,7 +245,7 @@ candidate_name: {result.candidate_name}
 document_id: {result.document_id}
 chunk_id: {result.chunk_id}
 section: {result.section}
-retrieval_score: {result.score}
+retrieval_score: {getattr(result, 'score', getattr(result, 'raw_score', 0.0))}
 text:
 {result.text}
 """.strip()
@@ -780,6 +785,7 @@ Do not return additional fields.
             prompt,
         )
 
+        get_llm_rate_limiter().acquire()
         response = (
             self._client.models.generate_content(
                 model=self.model,

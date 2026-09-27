@@ -33,7 +33,7 @@ from langchain_core.documents import Document
 
 from utils.config import get_settings
 from utils.logger import logger
-from utils.utils import RateLimiter
+from utils.utils import get_llm_rate_limiter
 
 
 # ============================================================
@@ -141,10 +141,7 @@ class GeminiEmbeddingService:
 
         self._client: genai.Client | None = None
 
-        self._rate_limiter = RateLimiter(
-            max_calls=self.config.LLM_REQUESTS_PER_MINUTE,
-            window_seconds=60.0,
-        )
+        self._rate_limiter = get_llm_rate_limiter()
 
     # ========================================================
     # Client
@@ -472,6 +469,30 @@ class GeminiEmbeddingService:
             )
 
         return embeddings[0]
+
+    def embed_queries(
+        self,
+        queries: Sequence[str],
+    ) -> list[list[float]]:
+        """Embed query chunks in batches using RETRIEVAL_QUERY."""
+
+        normalized_queries = [
+            query.strip()
+            for query in queries
+            if isinstance(query, str) and query.strip()
+        ]
+        if len(normalized_queries) != len(queries):
+            raise ValueError("All query chunks must be non-empty strings.")
+
+        embeddings: list[list[float]] = []
+        for start in range(0, len(normalized_queries), self.batch_size):
+            embeddings.extend(
+                self._embed_batch(
+                    normalized_queries[start : start + self.batch_size],
+                    task_type=QUERY_TASK_TYPE,
+                )
+            )
+        return embeddings
 
     # ========================================================
     # Dimension

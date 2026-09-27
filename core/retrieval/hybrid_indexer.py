@@ -1013,16 +1013,19 @@ class HybridIndexer:
             obj,
             Mapping,
         ):
-            return obj.get(
-                key,
-                default,
-            )
+            value = obj.get(key, default)
+            if value is default and key == "score":
+                value = obj.get("raw_score", default)
+            if value is default and key == "content":
+                value = obj.get("text", default)
+            return value
 
-        return getattr(
-            obj,
-            key,
-            default,
-        )
+        value = getattr(obj, key, default)
+        if value is default and key == "score":
+            value = getattr(obj, "raw_score", default)
+        if value is default and key == "content":
+            value = getattr(obj, "text", default)
+        return value
 
     @classmethod
     def _chunk_to_bm25_record(
@@ -1137,6 +1140,14 @@ class HybridIndexer:
         return self.bm25.upsert(
             records
         )
+
+    def add_documents(
+        self,
+        documents: Sequence[Any],
+    ) -> int:
+        """Index ingestion documents in the BM25 corpus."""
+
+        return self.index_chunks(documents)
 
     # --------------------------------------------------------
     # Score Normalization

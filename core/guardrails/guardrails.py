@@ -1,86 +1,84 @@
-"""
-Kokoro - Guardrails.
-
-Responsibilities:
-    - Validate user inputs.
-    - Detect prompt-injection attempts.
-    - Detect sensitive information / PII patterns.
-    - Validate generated responses.
-    - Prevent retrieved documents from overriding system instructions.
-    - Return structured guardrail results.
-
-This module does NOT:
-    - perform retrieval
-    - call Pinecone
-    - call BM25
-    - perform reranking
-    - generate LLM responses
-"""
-
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable
+from dataclasses import dataclass
+from typing import Any
 
 from utils.config import get_settings
-from utils.logger import logger
-from utils.schemas import (
-    GuardrailResult,
-    GuardrailStatus,
-    OutputValidationResult,
-    ValidationStatus,
-)
+from utils.logger import get_logger
+from utils.schemas import GuardrailResult, GuardrailStatus
+
+
+logger = get_logger(__name__)
 
 
 # ============================================================
-# Patterns
+# Prompt Injection Patterns
 # ============================================================
 
-PROMPT_INJECTION_PATTERNS = (
-    r"ignore\s+(all|any|the)\s+(previous|prior|above)\s+instructions?",
-    r"ignore\s+your\s+(system|developer)\s+instructions?",
-    r"disregard\s+(all|any|the)\s+(previous|prior|above)",
-    r"forget\s+(all|any|the)\s+(previous|prior|above)",
-    r"override\s+(your|the)\s+(system|developer)\s+instructions?",
-    r"reveal\s+(your|the)\s+(system|developer)\s+prompt",
-    r"show\s+(me\s+)?your\s+(system|developer)\s+prompt",
-    r"print\s+(your|the)\s+(system|developer)\s+prompt",
-    r"what\s+are\s+your\s+(system|developer)\s+instructions?",
-    r"bypass\s+(your|the)\s+safety",
-    r"disable\s+(your|the)\s+(guardrails|safety)",
-    r"act\s+as\s+(a\s+)?system",
-    r"you\s+are\s+now\s+the\s+system",
-)
+PROMPT_INJECTION_PATTERNS = [
+    r"ignore\s+(all|any|the)\s+(previous|prior|above)\s+instructions",
+    r"ignore\s+previous\s+instructions",
+    r"disregard\s+(all|any|the)\s+(previous|prior|above)\s+instructions",
+    r"forget\s+(all|any|the)\s+(previous|prior|above)\s+instructions",
+    r"system\s+prompt",
+    r"reveal\s+(your|the)\s+(system|hidden)\s+prompt",
+    r"show\s+(me\s+)?your\s+(system|hidden)\s+prompt",
+    r"developer\s+message",
+    r"jailbreak",
+    r"bypass\s+(your|the)\s+(rules|instructions|guardrails)",
+]
+
+
+# ============================================================
+# PII Patterns
+# ============================================================
 
 PII_PATTERNS = {
     "email": re.compile(
-        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
-        re.IGNORECASE,
+        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
     ),
     "phone": re.compile(
-        r"(?<!\d)(?:\+?\d[\d\s().-]{8,}\d)(?!\d)"
-    ),
-    "aadhaar": re.compile(
-        r"(?<!\d)\d{4}\s?\d{4}\s?\d{4}(?!\d)"
+        r"(?<!\d)(?:\+91[\s-]?)?[6-9]\d{9}(?!\d)"
     ),
     "pan": re.compile(
-        r"\b[A-Z]{5}\d{4}[A-Z]\b",
+        r"\b[A-Z]{5}[0-9]{4}[A-Z]\b",
         re.IGNORECASE,
     ),
+    "aadhaar": re.compile(
+        r"(?<!\d)\d{4}[\s-]?\d{4}[\s-]?\d{4}(?!\d)"
+    ),
 }
+
+
+# ============================================================
+# Result Model
+# ============================================================
+
+@dataclass
+class ValidationResult:
+    valid: bool
+    reason: str = ""
+    detected_items: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.detected_items is None:
+            self.detected_items = []
 
 
 # ============================================================
 # Guardrails
 # ============================================================
 
-
 class Guardrails:
     """
-    Central guardrail service for Kokoro.
+    Input, retrieved-context and output guardrails.
 
-    The service performs deterministic checks before and after
-    LLM generation.
+    Responsibilities:
+    - Prompt injection detection
+    - PII detection
+    - Retrieved-context validation
+    - Output validation
     """
 
     def __init__(
@@ -93,96 +91,46 @@ class Guardrails:
 
         self.settings = get_settings()
 
+        # --------------------------------------------------------
+        # IMPORTANT:
+        # Use the actual settings names from config.py
+        # --------------------------------------------------------
+
         self.block_prompt_injection = (
             block_prompt_injection
             if block_prompt_injection is not None
-            else self.settings.ENABLE_GUARDRAILS
+            else self.settings.BLOCK_PROMPT_INJECTION
         )
 
-        self.detect_pii = (
+        # Do NOT name this attribute "detect_pii"
+        # because detect_pii() is also a method.
+        self.detect_pii_enabled = (
             detect_pii
             if detect_pii is not None
-            else self.settings.ENABLE_PII_PROTECTION
+            else self.settings.ENABLE_INPUT_GUARDRAIL
         )
 
         self.validate_output_enabled = (
             validate_output
             if validate_output is not None
-            else self.settings.ENABLE_OUTPUT_VALIDATION
+            else self.settings.ENABLE_OUTPUT_GUARDRAIL
         )
 
-    # ========================================================
-    # Text Normalization
-    # ========================================================
-
-    @staticmethod
-    def _normalize_text(
-        text: str,
-    ) -> str:
-        """
-        Normalize text before pattern matching.
-        """
-
-        if not text:
-            return ""
-
-        text = text.lower()
-
-        text = re.sub(
-            r"\s+",
-            " ",
-            text,
+        logger.info(
+            "Guardrails initialized | "
+            "prompt_injection=%s | pii=%s | output=%s",
+            self.block_prompt_injection,
+            self.detect_pii_enabled,
+            self.validate_output_enabled,
         )
 
-        return text.strip()
-
-    # ========================================================
+    # ============================================================
     # Prompt Injection
-    # ========================================================
+    # ============================================================
 
-    def detect_prompt_injection(
-        self,
-        text: str,
-    ) -> list[str]:
+    def detect_prompt_injection(self, text: str) -> list[str]:
         """
-        Detect common prompt-injection patterns.
-
-        Returns:
-            List of matched pattern descriptions.
-        """
-
-        if not text:
-            return []
-
-        normalized = self._normalize_text(
-            text
-        )
-
-        matches: list[str] = []
-
-        for pattern in PROMPT_INJECTION_PATTERNS:
-
-            if re.search(
-                pattern,
-                normalized,
-                re.IGNORECASE,
-            ):
-                matches.append(pattern)
-
-        return matches
-
-    # ========================================================
-    # PII Detection
-    # ========================================================
-
-    def detect_pii(
-        self,
-        text: str,
-    ) -> list[str]:
-        """
-        Detect common PII patterns.
-
-        This is detection only; it does not modify the text.
+        Detect potential prompt-injection patterns.
         """
 
         if not text:
@@ -190,331 +138,284 @@ class Guardrails:
 
         detected: list[str] = []
 
-        for pii_type, pattern in PII_PATTERNS.items():
-
-            if pattern.search(text):
-                detected.append(
-                    pii_type
+        for pattern in PROMPT_INJECTION_PATTERNS:
+            try:
+                if re.search(pattern, text, flags=re.IGNORECASE):
+                    detected.append(pattern)
+            except re.error:
+                logger.exception(
+                    "Invalid prompt injection regex: %s",
+                    pattern,
                 )
 
         return detected
 
-    # ========================================================
+    # ============================================================
+    # PII Detection
+    # ============================================================
+
+    def detect_pii(self, text: str) -> dict[str, list[str]]:
+        """
+        Detect common PII patterns.
+        """
+
+        if not text:
+            return {}
+
+        detected: dict[str, list[str]] = {}
+
+        for pii_type, pattern in PII_PATTERNS.items():
+            matches = pattern.findall(text)
+
+            if matches:
+                detected[pii_type] = list(set(matches))
+
+        return detected
+
+    # ============================================================
     # Input Validation
-    # ========================================================
+    # ============================================================
 
-    def validate_input(
-        self,
-        text: str,
-    ) -> GuardrailResult:
+    def validate_input(self, text: str) -> GuardrailResult:
         """
-        Validate user input before retrieval/generation.
+        Validate user query before retrieval.
         """
 
-        if not isinstance(text, str):
-
+        if not text or not text.strip():
             return GuardrailResult(
                 status=GuardrailStatus.BLOCKED,
-                reason="Input must be a string.",
-                details={},
+                passed=False,
+                reason="Input query is empty.",
             )
 
-        if not text.strip():
+        text = text.strip()
 
-            return GuardrailResult(
-                status=GuardrailStatus.BLOCKED,
-                reason="Input cannot be empty.",
-                details={},
-            )
-
-        prompt_injection_matches = []
+        # --------------------------------------------------------
+        # Prompt Injection
+        # --------------------------------------------------------
 
         if self.block_prompt_injection:
-            prompt_injection_matches = (
-                self.detect_prompt_injection(
-                    text
+
+            injection_matches = self.detect_prompt_injection(text)
+
+            if injection_matches:
+                logger.warning(
+                    "Prompt injection detected in user input."
                 )
-            )
 
-        if prompt_injection_matches:
+                return GuardrailResult(
+                    status=GuardrailStatus.BLOCKED,
+                    passed=False,
+                    reason="Potential prompt injection detected.",
+                )
 
-            logger.warning(
-                "Prompt injection detected."
-            )
+        # --------------------------------------------------------
+        # PII
+        # --------------------------------------------------------
 
-            return GuardrailResult(
-                status=GuardrailStatus.BLOCKED,
-                reason="Potential prompt injection detected.",
-                details={
-                    "prompt_injection": True,
-                    "matches": len(
-                        prompt_injection_matches
-                    ),
-                },
-            )
+        if self.detect_pii_enabled:
 
-        pii_matches = []
+            pii_matches = self.detect_pii(text)
 
-        if self.detect_pii:
-            pii_matches = self.detect_pii(
-                text
-            )
+            if pii_matches:
+
+                logger.warning(
+                    "PII detected in user input: %s",
+                    list(pii_matches.keys()),
+                )
+
+                return GuardrailResult(
+                    status=GuardrailStatus.BLOCKED,
+                    passed=False,
+                    reason="Potentially sensitive personal information detected.",
+                )
 
         return GuardrailResult(
             status=GuardrailStatus.PASSED,
-            reason="Input passed guardrail checks.",
-            details={
-                "prompt_injection": False,
-                "pii_detected": pii_matches,
-            },
+            passed=True,
+            reason="Input passed guardrails.",
         )
 
-    # ========================================================
-    # Retrieved Content Validation
-    # ========================================================
+    # ============================================================
+    # Retrieved Context Validation
+    # ============================================================
 
-    def validate_retrieved_content(
+    def validate_retrieved_context(
         self,
-        contents: Iterable[str],
+        documents: list[Any],
     ) -> GuardrailResult:
         """
-        Validate retrieved documents as untrusted content.
-
-        Retrieved resumes/JDs must never be allowed to override
-        system or developer instructions.
+        Validate retrieved documents before sending them to the LLM.
         """
 
-        injection_count = 0
-        pii_types: set[str] = set()
+        if not documents:
+            return GuardrailResult(
+                status=GuardrailStatus.BLOCKED,
+                passed=False,
+                reason="No retrieved documents found.",
+            )
 
-        for content in contents:
+        for document in documents:
 
-            if not isinstance(content, str):
+            if isinstance(document, str):
+                content = document
+
+            elif hasattr(document, "page_content"):
+                content = document.page_content
+
+            elif isinstance(document, dict):
+                content = str(
+                    document.get(
+                        "text",
+                        document.get(
+                            "content",
+                            "",
+                        ),
+                    )
+                )
+
+            else:
+                content = str(document)
+
+            if not content.strip():
                 continue
 
+            # Prompt injection inside retrieved documents
             if self.block_prompt_injection:
 
-                matches = self.detect_prompt_injection(
+                injection_matches = self.detect_prompt_injection(
                     content
                 )
 
-                if matches:
-                    injection_count += len(
-                        matches
+                if injection_matches:
+
+                    logger.warning(
+                        "Prompt injection detected in retrieved document."
                     )
 
-            if self.detect_pii:
-
-                pii_types.update(
-                    self.detect_pii(
-                        content
+                    return GuardrailResult(
+                        status=GuardrailStatus.BLOCKED,
+                        passed=False,
+                        reason=(
+                            "Potential prompt injection detected "
+                            "inside retrieved context."
+                        ),
                     )
-                )
 
-        if injection_count > 0:
+            # PII detection
+            if self.detect_pii_enabled:
 
-            logger.warning(
-                "Potential prompt injection found "
-                "inside retrieved content."
-            )
+                pii_matches = self.detect_pii(content)
 
-            return GuardrailResult(
-                status=GuardrailStatus.BLOCKED,
-                reason=(
-                    "Retrieved content contains "
-                    "potential prompt-injection instructions."
-                ),
-                details={
-                    "injection_count": injection_count,
-                    "pii_detected": sorted(
-                        pii_types
-                    ),
-                },
-            )
+                if pii_matches:
+
+                    logger.warning(
+                        "PII detected in retrieved document: %s",
+                        list(pii_matches.keys()),
+                    )
 
         return GuardrailResult(
             status=GuardrailStatus.PASSED,
-            reason=(
-                "Retrieved content passed guardrail checks."
-            ),
-            details={
-                "injection_count": 0,
-                "pii_detected": sorted(
-                    pii_types
-                ),
-            },
+            passed=True,
+            reason="Retrieved context passed guardrails.",
         )
 
-    # ========================================================
+    # ============================================================
     # Output Validation
-    # ========================================================
+    # ============================================================
 
     def validate_output(
         self,
         output: str,
-        *,
-        source_texts: Iterable[str] | None = None,
-    ) -> OutputValidationResult:
+    ) -> GuardrailResult:
         """
-        Validate generated output.
-
-        Checks:
-            - output is non-empty
-            - optional PII detection
-            - optional unsupported claims based on basic
-              source-term overlap
-
-        This is a deterministic safety check, not a full
-        semantic factuality evaluator.
+        Validate generated LLM output.
         """
 
-        if not isinstance(output, str):
-
-            return OutputValidationResult(
-                status=ValidationStatus.INVALID,
-                reason="Output must be a string.",
-                details={},
+        if not output or not output.strip():
+            return GuardrailResult(
+                status=GuardrailStatus.BLOCKED,
+                passed=False,
+                reason="Generated output is empty.",
             )
 
         cleaned_output = output.strip()
 
-        if not cleaned_output:
+        # --------------------------------------------------------
+        # PII
+        # --------------------------------------------------------
 
-            return OutputValidationResult(
-                status=ValidationStatus.INVALID,
-                reason="Generated output is empty.",
-                details={},
-            )
+        if self.detect_pii_enabled:
 
-        pii_matches: list[str] = []
+            pii_matches = self.detect_pii(cleaned_output)
 
-        if self.detect_pii:
+            if pii_matches:
 
-            pii_matches = self.detect_pii(
-                cleaned_output
-            )
-
-        injection_matches = []
-
-        if self.block_prompt_injection:
-
-            injection_matches = (
-                self.detect_prompt_injection(
-                    cleaned_output
+                logger.warning(
+                    "PII detected in generated output: %s",
+                    list(pii_matches.keys()),
                 )
-            )
 
-        if injection_matches:
+                return GuardrailResult(
+                    status=GuardrailStatus.BLOCKED,
+                    passed=False,
+                    reason="Generated output contains potentially sensitive information.",
+                )
 
-            return OutputValidationResult(
-                status=ValidationStatus.INVALID,
-                reason=(
-                    "Generated output contains "
-                    "potential prompt-injection content."
-                ),
-                details={
-                    "prompt_injection": True,
-                },
-            )
-
-        if pii_matches:
-
-            logger.warning(
-                "PII detected in generated output: %s",
-                pii_matches,
-            )
-
-        source_count = 0
-
-        if source_texts is not None:
-
-            source_count = sum(
-                1
-                for source in source_texts
-                if isinstance(source, str)
-                and source.strip()
-            )
-
-        return OutputValidationResult(
-            status=ValidationStatus.VALID,
-            reason="Generated output passed validation.",
-            details={
-                "pii_detected": pii_matches,
-                "source_count": source_count,
-            },
+        return GuardrailResult(
+            status=GuardrailStatus.PASSED,
+            passed=True,
+            reason="Generated output passed guardrails.",
         )
 
-    # ========================================================
-    # Combined Input Check
-    # ========================================================
-
-    def check_input(
-        self,
-        text: str,
-    ) -> bool:
-        """
-        Convenience method.
-
-        Returns:
-            True when input passes.
-        """
-
-        result = self.validate_input(
-            text
-        )
-
-        return (
-            result.status
-            == GuardrailStatus.PASSED
-        )
-
-    # ========================================================
-    # Combined Output Check
-    # ========================================================
+    # ============================================================
+    # Unified Output Check
+    # ============================================================
 
     def check_output(
         self,
         output: str,
-        *,
-        source_texts: Iterable[str] | None = None,
-    ) -> bool:
-        """
-        Convenience method.
-
-        Returns:
-            True when output passes.
-        """
+    ) -> GuardrailResult:
 
         if not self.validate_output_enabled:
-            return True
+            return GuardrailResult(
+                status=GuardrailStatus.PASSED,
+                passed=True,
+                reason="Output guardrail is disabled.",
+            )
 
-        result = self.validate_output(
-            output,
-            source_texts=source_texts,
-        )
-
-        return (
-            result.status
-            == ValidationStatus.VALID
-        )
+        return self.validate_output(output)
 
 
 # ============================================================
 # Factory
 # ============================================================
 
+_guardrails_instance: Guardrails | None = None
 
-_guardrails: Guardrails | None = None
+
+def create_guardrails(
+    *,
+    block_prompt_injection: bool | None = None,
+    detect_pii: bool | None = None,
+    validate_output: bool | None = None,
+) -> Guardrails:
+
+    global _guardrails_instance
+
+    if _guardrails_instance is None:
+
+        _guardrails_instance = Guardrails(
+            block_prompt_injection=block_prompt_injection,
+            detect_pii=detect_pii,
+            validate_output=validate_output,
+        )
+
+    return _guardrails_instance
 
 
-def create_guardrails() -> Guardrails:
-    """
-    Return the shared Guardrails instance.
-    """
-
-    global _guardrails
-
-    if _guardrails is None:
-        _guardrails = Guardrails()
-
-    return _guardrails
+__all__ = [
+    "Guardrails",
+    "ValidationResult",
+    "create_guardrails",
+]

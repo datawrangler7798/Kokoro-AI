@@ -26,6 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from utils.config import get_settings
 from utils.logger import get_logger
 from utils.schemas import RetrievalMethod, RetrievalResult
@@ -181,6 +183,18 @@ class GoogleEmbeddingProvider:
         )
 
         self._client: Any | None = None
+        self._embedding_service: Any | None = None
+
+    def _get_embedding_service(self) -> Any:
+        """Return the shared implementation for document and query vectors."""
+        if self._embedding_service is None:
+            from core.retrieval.embedding import GeminiEmbeddingService
+
+            self._embedding_service = GeminiEmbeddingService(
+                model_name=self.model_name,
+                dimension=self.dimension,
+            )
+        return self._embedding_service
 
     def _get_client(self) -> Any:
         """Create the Google GenAI client lazily."""
@@ -286,36 +300,7 @@ class GoogleEmbeddingProvider:
             output_dimensionality = 768
         """
 
-        if not texts:
-            return []
-
-        client = self._get_client()
-
-        vectors: list[list[float]] = []
-
-        for text in texts:
-
-            if not text or not text.strip():
-                raise ValueError(
-                    "Cannot embed an empty document."
-                )
-
-            response = client.models.embed_content(
-                model=self.model_name,
-                contents=text,
-                config={
-                    "task_type": self.DOCUMENT_TASK_TYPE,
-                    "output_dimensionality": self.dimension,
-                },
-            )
-
-            vector = self._extract_embedding(
-                response
-            )
-
-            vectors.append(vector)
-
-        return vectors
+        return self._get_embedding_service().embed_texts(texts)
 
     def embed_query(
         self,
@@ -329,25 +314,15 @@ class GoogleEmbeddingProvider:
             output_dimensionality = 768
         """
 
-        if not text or not text.strip():
-            raise ValueError(
-                "Cannot embed an empty query."
-            )
+        return self._get_embedding_service().embed_query(text)
 
-        client = self._get_client()
+    def embed_queries(
+        self,
+        texts: Sequence[str],
+    ) -> list[list[float]]:
+        """Batch-embed query chunks in the query task space."""
 
-        response = client.models.embed_content(
-            model=self.model_name,
-            contents=text,
-            config={
-                "task_type": self.QUERY_TASK_TYPE,
-                "output_dimensionality": self.dimension,
-            },
-        )
-
-        return self._extract_embedding(
-            response
-        )
+        return self._get_embedding_service().embed_queries(texts)
 
 
 # ============================================================
@@ -679,34 +654,6 @@ class PineconeVectorStore:
         internal vector record.
         """
 
-        vector_id = (
-            cls._get_value(
-                chunk,
-                "chunk_id",
-            )
-            or cls._get_value(
-                chunk,
-                "id",
-            )
-        )
-
-        if not vector_id:
-            raise ValueError(
-                "Chunk is missing chunk_id."
-            )
-
-        content = (
-            cls._get_value(
-                chunk,
-                "content",
-            )
-            or cls._get_value(
-                chunk,
-                "text",
-            )
-            or ""
-        )
-
         metadata = (
             cls._get_value(
                 chunk,
@@ -723,6 +670,21 @@ class PineconeVectorStore:
             metadata = metadata.model_dump()
 
         metadata = dict(metadata)
+
+        vector_id = (
+            cls._get_value(chunk, "chunk_id")
+            or metadata.get("chunk_id")
+            or cls._get_value(chunk, "id")
+        )
+        if not vector_id:
+            raise ValueError("Chunk is missing chunk_id metadata.")
+
+        content = (
+            cls._get_value(chunk, "content")
+            or cls._get_value(chunk, "text")
+            or cls._get_value(chunk, "page_content")
+            or ""
+        )
 
         # Preserve important retrieval metadata explicitly.
         for key in (
@@ -797,6 +759,10 @@ class PineconeVectorStore:
                     chunk,
                     "text",
                 )
+                or self._get_value(
+                    chunk,
+                    "page_content",
+                )
                 or ""
             )
 
@@ -806,6 +772,9 @@ class PineconeVectorStore:
                 )
 
             texts.append(text)
+
+        # Create the Pinecone index before the first vector upsert.
+        self.ensure_index()
 
         logger.info(
             "Generating embeddings for %d chunks.",
@@ -1115,14 +1084,14 @@ class PineconeVectorStore:
                 )
                 or match.vector_id
             ),
-            "document_id": metadata.get(
-                "document_id"
-            ),
+            "document_id": metadata.get("document_id") or match.vector_id,
+            "document_type": metadata.get("document_type", "resume"),
             "candidate_id": metadata.get(
                 "candidate_id"
             ),
-            "score": match.score,
-            "content": (
+            "candidate_name": metadata.get("candidate_name"),
+            "section": metadata.get("section"),
+            "text": (
                 metadata.get(
                     "text"
                 )
@@ -1131,10 +1100,13 @@ class PineconeVectorStore:
                 )
                 or ""
             ),
+            "source_file": metadata.get("source_file") or metadata.get("source"),
+            "page_number": metadata.get("page_number") or metadata.get("page"),
+            "retrieval_method": RetrievalMethod.DENSE,
+            "raw_score": match.score,
+            "normalized_score": match.score,
+            "rank": 1,
             "metadata": metadata,
-            "retrieval_method": (
-                RetrievalMethod.DENSE
-            ),
         }
 
         # Pydantic v2.
@@ -1165,17 +1137,9 @@ class PineconeVectorStore:
         """
         Perform semantic similarity search.
 
-        Flow:
-
-            recruiter query
-                    ↓
-              query embedding
-                    ↓
-                 Pinecone
-                    ↓
-                top-k matches
-                    ↓
-              RetrievalResult
+        Split long recruiter inputs into chunks, embed each chunk with
+        RETRIEVAL_QUERY, search Pinecone for each vector, then merge
+        duplicate chunk matches by their strongest similarity score.
         """
 
         if not query or not query.strip():
@@ -1192,11 +1156,27 @@ class PineconeVectorStore:
                 "top_k must be greater than zero."
             )
 
-        query_vector = (
-            self.embedding_provider.embed_query(
-                query
-            )
-        )
+        # Ensure the configured Pinecone index exists before querying.
+        self.ensure_index()
+
+        query_chunks = RecursiveCharacterTextSplitter(
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+            length_function=len,
+        ).split_text(query.strip())
+        if not query_chunks:
+            return []
+
+        batch_embed = getattr(self.embedding_provider, "embed_queries", None)
+        if callable(batch_embed):
+            query_vectors = batch_embed(query_chunks)
+        else:
+            query_vectors = [
+                self.embedding_provider.embed_query(chunk)
+                for chunk in query_chunks
+            ]
+        if len(query_vectors) != len(query_chunks):
+            raise RuntimeError("Query chunk and embedding counts do not match.")
 
         pinecone_filter = (
             self._build_filter(
@@ -1204,29 +1184,37 @@ class PineconeVectorStore:
             )
         )
 
-        response = self.index.query(
-            vector=query_vector,
-            top_k=k,
-            namespace=self.namespace,
-            filter=pinecone_filter,
-            include_metadata=True,
-            include_values=False,
-        )
+        best_matches: dict[str, VectorSearchMatch] = {}
+        for vector in query_vectors:
+            response = self.index.query(
+                vector=vector,
+                top_k=k,
+                namespace=self.namespace,
+                filter=pinecone_filter,
+                include_metadata=True,
+                include_values=False,
+            )
+            for match in self._parse_matches(response):
+                current = best_matches.get(match.vector_id)
+                if current is None or match.score > current.score:
+                    best_matches[match.vector_id] = match
 
-        matches = self._parse_matches(
-            response
-        )
+        matches = sorted(
+            best_matches.values(),
+            key=lambda match: match.score,
+            reverse=True,
+        )[:k]
 
         results = [
             self._build_retrieval_result(
                 match
-            )
-            for match in matches
+            ).model_copy(update={"rank": rank})
+            for rank, match in enumerate(matches, start=1)
         ]
 
         logger.info(
-            "Semantic search completed: query=%s results=%d top_k=%d",
-            query[:100],
+            "Chunked semantic search completed: chunks=%d results=%d top_k=%d",
+            len(query_chunks),
             len(results),
             k,
         )

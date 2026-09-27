@@ -117,7 +117,7 @@ def _get_log_level(
 
 def configure_logger(
     level: str = DEFAULT_LOG_LEVEL,
-    enable_file_logging: bool = False,
+    enable_file_logging: bool = True,
     log_directory: str = DEFAULT_LOG_DIRECTORY,
     log_file: str = DEFAULT_LOG_FILE,
 ) -> logging.Logger:

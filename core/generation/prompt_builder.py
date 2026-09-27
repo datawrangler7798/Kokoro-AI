@@ -158,11 +158,11 @@ class PromptBuilder:
                         ),
                         (
                             f"Retrieval Score: "
-                            f"{result.score:.4f}"
+                            f"{getattr(result, 'score', getattr(result, 'raw_score', 0.0)):.4f}"
                         ),
                         (
                             "Content:\n"
-                            f"{result.content}"
+                            f"{getattr(result, 'content', getattr(result, 'text', ''))}"
                         ),
                     ]
                 )

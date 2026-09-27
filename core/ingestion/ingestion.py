@@ -53,7 +53,6 @@ from utils.schemas import (
 from utils.utils import (
     calculate_file_hash,
     get_file_extension,
-    get_file_size_bytes,
     sanitize_filename,
     validate_file_size,
 )
@@ -79,9 +78,9 @@ class VectorStoreProtocol(Protocol):
     vector_store.py will implement this interface.
     """
 
-    def index_documents(
+    def upsert_chunks(
         self,
-        documents: list[LangChainDocument],
+        chunks: list[LangChainDocument],
     ) -> Any:
         ...
 
@@ -158,7 +157,13 @@ class IngestionService:
         ] = None,
     ) -> None:
 
-        self.vector_store = vector_store
+        if vector_store is None:
+            from core.retrieval.vector_store import create_vector_store
+
+            self.vector_store = create_vector_store()
+        else:
+            self.vector_store = vector_store
+
         self.hybrid_indexer = hybrid_indexer
         self.registry = registry
 
@@ -217,12 +222,8 @@ class IngestionService:
                 f"Allowed: {allowed_extensions}"
             )
 
-        file_size = get_file_size_bytes(
-            path
-        )
-
         validate_file_size(
-            file_size,
+            path,
             settings.MAX_FILE_SIZE_MB,
         )
 
@@ -468,7 +469,7 @@ class IngestionService:
             len(chunks),
         )
 
-        return self.vector_store.index_documents(
+        return self.vector_store.upsert_chunks(
             chunks
         )
 
@@ -936,6 +937,69 @@ class IngestionService:
 
 
 # ============================================================
+# EXISTING RESUME INGESTION
+# ============================================================
+
+
+def ingest_existing_resumes(
+    vector_store: Optional[
+        VectorStoreProtocol
+    ] = None,
+    hybrid_indexer: Optional[
+        HybridIndexerProtocol
+    ] = None,
+    registry: Optional[
+        RegistryProtocol
+    ] = None,
+    progress_callback: Optional[
+        Callable[[int, int, dict[str, Any]], None]
+    ] = None,
+) -> dict[str, Any]:
+    """
+    Discover and ingest PDF resumes already present in the
+    configured resume directory.
+    """
+
+    resume_directory = Path(
+        settings.RESUME_DIRECTORY
+    )
+
+    if not resume_directory.exists():
+        logger.info(
+            "Resume directory does not exist: %s",
+            resume_directory,
+        )
+        return {
+            "total_files": 0,
+            "processed_files": 0,
+            "successful_files": 0,
+            "skipped_files": 0,
+            "failed_files": 0,
+            "total_chunks": 0,
+            "results": [],
+        }
+
+    file_paths = sorted(
+        resume_directory.glob("*.pdf")
+    )
+
+    logger.info(
+        "Discovered existing resumes | directory=%s | files=%d",
+        resume_directory,
+        len(file_paths),
+    )
+
+    return ingest_batch(
+        file_paths=file_paths,
+        document_type=DocumentType.RESUME,
+        vector_store=vector_store,
+        hybrid_indexer=hybrid_indexer,
+        registry=registry,
+        progress_callback=progress_callback,
+    )
+
+
+# ============================================================
 # DEFAULT SERVICE FACTORY
 # ============================================================
 
@@ -1046,4 +1110,5 @@ __all__ = [
     "create_ingestion_service",
     "ingest_file",
     "ingest_batch",
+    "ingest_existing_resumes",
 ]

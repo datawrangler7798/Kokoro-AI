@@ -13,6 +13,8 @@ The business logic remains inside the core modules.
 from __future__ import annotations
 
 import sys
+import subprocess
+from pathlib import Path
 
 from utils.config import get_settings
 from utils.logger import logger
@@ -145,16 +147,11 @@ def run_streamlit() -> None:
     This function is provided as a convenience entry point.
     """
 
-    try:
-        from ui.app import main as streamlit_main
-
-    except ImportError as exc:
-
-        raise RuntimeError(
-            "Unable to import the Streamlit application."
-        ) from exc
-
-    streamlit_main()
+    app_path = Path(__file__).resolve().with_name("app.py")
+    subprocess.run(
+        [sys.executable, "-m", "streamlit", "run", str(app_path)],
+        check=True,
+    )
 
 
 # ============================================================

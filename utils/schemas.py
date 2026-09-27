@@ -1123,6 +1123,19 @@ class GuardrailResult(KokoroBaseModel):
 
     sanitized_text: str | None = None
 
+    @property
+    def valid(self) -> bool:
+        """Backward-compatible alias for callers using the earlier result shape."""
+        return self.passed
+
+    @property
+    def is_safe(self) -> bool:
+        return self.passed
+
+    @property
+    def is_valid(self) -> bool:
+        return self.passed
+
     @model_validator(mode="after")
     def validate_status(self):
         """

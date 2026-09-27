@@ -38,6 +38,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from utils.config import get_settings
 from utils.logger import get_logger
+from utils.utils import get_llm_rate_limiter
 from utils.multi_query import (
     get_queries_for_retrieval,
 )
@@ -215,6 +216,7 @@ Rules:
             api_key=self.api_key
         )
 
+        get_llm_rate_limiter().acquire()
         response = client.models.generate_content(
             model=self.model_name,
             contents=prompt,
