@@ -59,6 +59,7 @@ This module does NOT:
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Optional
 
@@ -624,12 +625,17 @@ Do not return additional fields.
             )
         )
 
-        experience_match = bool(
-            raw.get(
-                "experience_match",
-                False,
+        experience_match_value = raw.get("experience_match")
+        if isinstance(experience_match_value, bool):
+            experience_match = (
+                "Meets the experience requirement"
+                if experience_match_value
+                else "Does not meet or cannot confirm the experience requirement"
             )
-        )
+        elif experience_match_value is None:
+            experience_match = None
+        else:
+            experience_match = str(experience_match_value).strip() or None
 
         explanation = str(
             raw.get(
@@ -761,6 +767,58 @@ Do not return additional fields.
             result.rank = rank
 
         return reranked
+
+    @staticmethod
+    def _fallback_results(
+        results: list[RetrievalResult],
+        top_k: int,
+    ) -> list[RerankResult]:
+        """Return grounded candidates ranked by hybrid score when Gemini is down."""
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for result in results:
+            candidate_id = result.candidate_id or result.metadata.get("candidate_id")
+            if not candidate_id:
+                continue
+
+            candidate_id = str(candidate_id)
+            score = result.normalized_score
+            if score is None:
+                score = result.raw_score
+            score = max(0.0, min(1.0, float(score)))
+            item = grouped.setdefault(
+                candidate_id,
+                {
+                    "candidate_name": result.candidate_name or result.metadata.get("candidate_name"),
+                    "score": score,
+                    "evidence": [],
+                    "chunk_ids": [],
+                },
+            )
+            item["score"] = max(item["score"], score)
+            evidence = result.text.strip()
+            if evidence and evidence not in item["evidence"]:
+                item["evidence"].append(evidence[:600])
+            if result.chunk_id not in item["chunk_ids"]:
+                item["chunk_ids"].append(result.chunk_id)
+
+        ranked = sorted(
+            grouped.items(),
+            key=lambda pair: pair[1]["score"],
+            reverse=True,
+        )[:top_k]
+        return [
+            RerankResult(
+                candidate_id=candidate_id,
+                candidate_name=item["candidate_name"],
+                match_score=item["score"],
+                explanation="Ranked by combined semantic and keyword retrieval; candidate details below are from resume evidence.",
+                evidence=item["evidence"][:3],
+                source_chunk_ids=item["chunk_ids"],
+                rank=rank,
+            )
+            for rank, (candidate_id, item) in enumerate(ranked, start=1)
+        ]
 
     # ========================================================
     # GEMINI CALL
@@ -934,10 +992,21 @@ Do not return additional fields.
                     attempt + 1,
                 )
 
-        raise RuntimeError(
-            "Gemini reranking failed after "
-            f"{self.max_retries + 1} attempts."
-        ) from last_error
+                # Server overloads are unlikely to recover during another
+                # immediate app-level retry; use retrieved evidence instead.
+                if re.search(r"\b(429|500|502|503|504)\b", str(exc)):
+                    break
+
+        fallback = self._fallback_results(
+            selected_results,
+            top_k=top_k or settings.RERANK_TOP_K,
+        )
+        logger.warning(
+            "Using retrieval-score candidate ordering after Gemini reranking failure | candidates=%d last_error=%s",
+            len(fallback),
+            last_error,
+        )
+        return fallback
 
     # ========================================================
     # CONVENIENCE METHOD

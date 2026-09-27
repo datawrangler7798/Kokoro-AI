@@ -54,6 +54,7 @@ from core.application import create_application
 from core.evaluation.evaluator import create_evaluator
 from utils.config import get_settings
 from utils.logger import logger
+from utils.schemas import DocumentType, SearchFilters
 
 
 # ============================================================
@@ -71,6 +72,14 @@ WELCOME_MESSAGE = (
     "I’ll compare it with the indexed resumes and find relevant candidates."
 )
 
+RECRUITMENT_SCOPE_PATTERN = re.compile(
+    r"\b(candidate|applicant|resume|cv|job|role|position|recruit(?:er|ment)?|"
+    r"hir(?:e|ing)|skill|experience|qualification|salary|responsibilit(?:y|ies)|"
+    r"interview|accountant|accounting|engineer|developer|designer|analyst|manager|"
+    r"sales|nurse|teacher|technician|intern|employee|career)\b",
+    re.IGNORECASE,
+)
+
 
 def welcome_messages() -> list[dict[str, str]]:
     return [{"role": "assistant", "content": WELCOME_MESSAGE}]
@@ -79,8 +88,16 @@ def welcome_messages() -> list[dict[str, str]]:
 def is_greeting(message: str) -> bool:
     """Recognize short greetings so they are not mistaken for a JD."""
 
-    normalized = re.sub(r"[^a-z\s]", " ", message.lower())
-    normalized = " ".join(normalized.split())
+    words = re.sub(r"[^a-z\s]", " ", message.lower()).split()
+    common_typos = {
+        "hlo": "hello",
+        "helo": "hello",
+        "helloo": "hello",
+        "hii": "hi",
+        "hiii": "hi",
+        "heyy": "hey",
+    }
+    normalized = " ".join(common_typos.get(word, word) for word in words)
     return normalized in {
         "hi",
         "hello",
@@ -95,6 +112,45 @@ def is_greeting(message: str) -> bool:
         "good afternoon",
         "good evening",
     }
+
+
+def looks_like_job_description(message: str) -> bool:
+    """Identify a pasted JD so it replaces the active one in this chat."""
+
+    normalized = message.lower()
+    jd_headings = (
+        "job description",
+        "responsibilities",
+        "required skills",
+        "preferred qualifications",
+        "requirements",
+        "what you will do",
+        "qualifications",
+    )
+    return (
+        len(message.strip()) >= 500
+        and bool(RECRUITMENT_SCOPE_PATTERN.search(message))
+    ) or (
+        len(message.strip()) >= 180
+        and any(heading in normalized for heading in jd_headings)
+    )
+
+
+def is_recruitment_related(message: str) -> bool:
+    """Keep unrelated chat text from entering recruiter retrieval."""
+
+    if looks_like_job_description(message):
+        return True
+    if RECRUITMENT_SCOPE_PATTERN.search(message):
+        return True
+    return bool(
+        re.search(
+            r"\b(?:who|which)\s+(?:is|has|are|have|would|should)\b|"
+            r"\b(?:compare|rank|shortlist)\b",
+            message,
+            re.IGNORECASE,
+        )
+    )
 
 
 def create_session_id(existing_ids: list[str] | None = None) -> str:
@@ -169,6 +225,9 @@ def initialize_session() -> None:
     if "job_description" not in st.session_state:
         st.session_state.job_description = None
 
+    if "pending_search" not in st.session_state:
+        st.session_state.pending_search = None
+
     if "session_job_descriptions" not in st.session_state:
         st.session_state.session_job_descriptions = {
             st.session_state.session_id: st.session_state.job_description
@@ -214,6 +273,14 @@ def initialize_session() -> None:
         st.session_state.session_id,
         st.session_state.job_description,
     )
+
+    # Clear a greeting that an earlier app version accidentally saved as a JD.
+    if is_greeting(str(st.session_state.job_description or "")):
+        st.session_state.job_description = None
+        st.session_state.pending_search = None
+        st.session_state.session_job_descriptions[st.session_state.session_id] = None
+        st.session_state.messages = welcome_messages()
+        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
 
 
 # ============================================================
@@ -413,7 +480,15 @@ def render_chat_history() -> None:
         )
 
         with st.chat_message(role):
-            st.markdown(content)
+            if role == "user" and (
+                message.get("kind") == "job_description"
+                or looks_like_job_description(content)
+            ):
+                st.markdown("**Job description submitted**")
+                with st.expander("View job description"):
+                    st.text(content)
+            else:
+                st.markdown(content)
             if role == "assistant":
                 render_candidate_cards(message.get("candidates", []))
                 evidence = message.get("evidence", [])
@@ -578,6 +653,7 @@ def process_query(
             session_id=st.session_state.session_id,
         )
     except Exception as exc:
+        logger.exception("Recruiter query failed | session_id=%s", st.session_state.session_id)
         st.error(str(exc))
         if settings.APP_ENV == "development":
             st.exception(exc)
@@ -590,70 +666,21 @@ def process_query(
 # ============================================================
 
 
-def render_chat_input() -> None:
-    """
-    Render chat input and process submitted queries.
-    """
+def process_pending_search() -> None:
+    """Run a submitted search after the active JD and chat history rerender."""
 
-    query = st.chat_input(
-        "Paste the job description to get started..."
-        if not st.session_state.job_description
-        else "Ask about candidates, skills, or experience..."
-    )
-
-    if not query:
+    pending = st.session_state.pending_search
+    if not pending:
         return
 
-    st.session_state.messages.append(
-        {
-            "role": "user",
-            "content": query,
-        }
-    )
-
-    with st.chat_message("user"):
-        st.markdown(query)
-
-    if is_greeting(query):
-        if st.session_state.job_description:
-            greeting_reply = (
-                "Hello! I’m ready to help with candidates for the active job description. "
-                "What would you like to know?"
-            )
-        else:
-            greeting_reply = (
-                "Hello! Please paste the job description here, and I’ll look "
-                "for matching candidates in your resume library."
-            )
-        with st.chat_message("assistant"):
-            st.markdown(greeting_reply)
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": greeting_reply,
-        })
-        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
-        st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
-        st.rerun()
-
-    is_new_jd = not st.session_state.job_description
-    if is_new_jd:
-        st.session_state.job_description = query.strip()
-        st.session_state.session_job_descriptions[st.session_state.session_id] = query.strip()
-
-    search_query = (
-        query
-        if is_new_jd
-        else f"Job description:\n{st.session_state.job_description}\n\nRecruiter question:\n{query}"
-    )
-
-    response = None
+    # Clear first so a Streamlit rerun or recoverable exception cannot submit
+    # the same search twice.
+    st.session_state.pending_search = None
     with st.chat_message("assistant"):
-        if is_new_jd:
-            st.markdown("**Thanks, I’ve got the job description.** I’m checking your resume library for matching candidates now.")
-        with st.spinner(
-            "Searching your resume library..."
-        ):
-            response = process_query(search_query)
+        if pending["job_description_changed"]:
+            st.markdown("**Job description updated.** I’m searching the resume library now.")
+        with st.spinner("Searching your resume library..."):
+            response = process_query(pending["search_query"])
 
         if response is not None:
             answer = extract_answer(response)
@@ -667,9 +694,9 @@ def render_chat_input() -> None:
                 with st.expander("Evidence"):
                     for item in response.evidence:
                         st.markdown(f"- {item}")
-            assistant_message = {
+            st.session_state.messages.append({
                 "role": "assistant",
-                "content": ("I’ve searched using the job description.\n\n" if is_new_jd else "") + answer,
+                "content": answer,
                 "candidates": [item.model_dump() for item in response.candidates],
                 "evidence": response.evidence,
                 "response_metadata": {
@@ -677,13 +704,104 @@ def render_chat_input() -> None:
                     "retrieved_chunk_ids": response.retrieved_chunk_ids,
                     "latency_ms": response.latency_ms,
                 },
-            }
-            st.session_state.messages.append(assistant_message)
-        elif is_new_jd:
+            })
+        else:
+            error_message = "I couldn’t complete that search. The job description is saved; please try again shortly."
+            st.markdown(error_message)
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": "I saved the job description for this chat, but couldn’t complete the search. You can ask me to try again once the search service is available.",
+                "content": error_message,
             })
+
+    st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
+    st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
+    st.rerun()
+
+
+def render_chat_input() -> None:
+    """Render the input and queue new searches for the next UI pass."""
+
+    query = st.chat_input(
+        "Paste the job description to get started..."
+        if not st.session_state.job_description
+        else "Ask about candidates, skills, or paste a new job description..."
+    )
+    if not query or not query.strip():
+        return
+
+    query = query.strip()
+    if is_greeting(query):
+        st.session_state.messages.append({"role": "user", "content": query})
+        greeting_reply = (
+            "Hello! I’m ready to help with candidates for the active job description. What would you like to know?"
+            if st.session_state.job_description
+            else "Hello! Please paste the job description here, and I’ll look for matching candidates in your resume library."
+        )
+        st.session_state.messages.append({"role": "assistant", "content": greeting_reply})
+        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
+        st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
+        st.rerun()
+
+    # Reject unsupported requests before they can be mistaken for a job
+    # description or combined with the active JD and sent to retrieval.
+    input_check = get_application().guardrails.validate_input(query)
+    if not input_check.passed:
+        st.session_state.messages.extend(
+            [
+                {"role": "user", "content": query},
+                {"role": "assistant", "content": input_check.reason},
+            ]
+        )
+        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
+        st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
+        st.rerun()
+
+    if not is_recruitment_related(query):
+        invalid_reply = (
+            "Invalid input. I can only help with professional job descriptions "
+            "and candidate-search questions. Please enter a recruiting-related request."
+        )
+        st.session_state.messages.extend(
+            [
+                {"role": "user", "content": query},
+                {"role": "assistant", "content": invalid_reply},
+            ]
+        )
+        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
+        st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
+        st.rerun()
+
+    is_new_jd = not st.session_state.job_description
+    is_replacement_jd = bool(
+        st.session_state.job_description and looks_like_job_description(query)
+    )
+    job_description_changed = is_new_jd or is_replacement_jd
+
+    if is_new_jd and not looks_like_job_description(query):
+        st.session_state.messages.append({"role": "user", "content": query})
+        prompt = "Hello! Please share the job description, and I’ll search your resume library for matching candidates."
+        st.session_state.messages.append({"role": "assistant", "content": prompt})
+        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
+        st.session_state.session_job_descriptions[st.session_state.session_id] = None
+        st.rerun()
+
+    if job_description_changed:
+        st.session_state.job_description = query
+        st.session_state.session_job_descriptions[st.session_state.session_id] = query
+        search_query = query
+        user_message = {"role": "user", "content": query, "kind": "job_description"}
+    else:
+        search_query = (
+            f"Job description:\n{st.session_state.job_description}\n\n"
+            f"Recruiter question:\n{query}"
+        )
+        user_message = {"role": "user", "content": query}
+
+    st.session_state.messages.append(user_message)
+    st.session_state.pending_search = {
+        "search_query": search_query,
+        "job_description_changed": job_description_changed,
+    }
     st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
     st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
     st.rerun()
@@ -691,12 +809,22 @@ def render_chat_input() -> None:
 
 def render_evaluation_tab() -> None:
     st.subheader("Evaluate a recruiter response")
-    st.caption("Run retrieval metrics against known candidate IDs and optional RAGAS answer metrics.")
+    st.caption(
+        "Check the hybrid Pinecone + BM25 ranking. To calculate retrieval metrics, "
+        "provide candidate IDs known to be relevant for this question."
+    )
     with st.form("evaluation_form"):
         question = st.text_input("Evaluation question")
         reference = st.text_area("Reference answer (optional)")
         relevant_ids = st.text_input(
-            "Relevant candidate IDs, comma separated (optional)"
+            "Known relevant candidate IDs, comma separated (optional)",
+            help="Use candidate IDs from your resume metadata. Without ground-truth IDs, the app can show the ranking but cannot calculate precision or recall.",
+        )
+        run_ragas = st.checkbox(
+            "Also score the generated answer with RAGAS (slower; uses Google Gemini)",
+            value=False,
+            disabled=not settings.ENABLE_RAGAS,
+            help="Enable ENABLE_RAGAS in configuration to use this option.",
         )
         submitted = st.form_submit_button("Run evaluation")
     if not submitted:
@@ -705,34 +833,78 @@ def render_evaluation_tab() -> None:
         st.error("Enter an evaluation question.")
         return
     try:
-        response = get_application().answer(
-            question,
-            st.session_state.session_id,
+        application = get_application()
+        retrieved = application.hybrid_indexer.search(
+            question.strip(),
+            top_k=settings.HYBRID_TOP_K,
+            semantic_top_k=settings.VECTOR_TOP_K,
+            keyword_top_k=settings.BM25_TOP_K,
+            filters=SearchFilters(document_type=DocumentType.RESUME),
         )
+
+        # The index returns chunks. Evaluation compares candidate rankings,
+        # so retain each candidate once at its best-ranked chunk position.
+        ranked_candidates: list[dict[str, Any]] = []
+        ranked_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for item in retrieved:
+            candidate_id = str(item.metadata.get("candidate_id") or "").strip()
+            if not candidate_id or candidate_id in seen_ids:
+                continue
+            seen_ids.add(candidate_id)
+            ranked_ids.append(candidate_id)
+            ranked_candidates.append(
+                {
+                    "Rank": len(ranked_ids),
+                    "Candidate ID": candidate_id,
+                    "Name": item.metadata.get("candidate_name") or "",
+                    "Hybrid score": round(float(item.hybrid_score), 4),
+                }
+            )
+
+        st.markdown("**Hybrid retrieval ranking**")
+        if ranked_candidates:
+            st.dataframe(ranked_candidates, hide_index=True, width="stretch")
+        else:
+            st.info("The hybrid search found no resume candidates for this question.")
+
         evaluator = get_evaluator()
         ids = [value.strip() for value in relevant_ids.split(",") if value.strip()]
-        retrieval_result = evaluator.evaluate_retrieval(
-            query=question,
-            ranked_ids=[candidate.candidate_id for candidate in response.candidates],
-            relevant_ids=ids,
-        ) if ids else None
-        ragas_result = evaluator.evaluate_generation(
-            question=question,
-            answer=response.answer,
-            contexts=response.metadata.get("retrieved_contexts", []),
-            reference=reference.strip() or None,
-        )
-        st.markdown("**Generated answer**")
-        st.write(response.answer)
-        if retrieval_result is not None:
+        if ids:
+            retrieval_result = evaluator.evaluate_retrieval(
+                query=question.strip(),
+                ranked_ids=ranked_ids,
+                relevant_ids=ids,
+            )
             st.markdown("**Retrieval metrics**")
             st.json(retrieval_result.model_dump())
-        if ragas_result is not None:
-            st.markdown("**RAGAS metrics**")
-            st.json(ragas_result.model_dump())
-        elif settings.ENABLE_RAGAS:
-            st.info("RAGAS evaluation is unavailable in this environment.")
+        else:
+            st.info(
+                "Ranking is shown above. Add known relevant candidate IDs and run again "
+                "to calculate precision@k, recall@k, MRR, and nDCG."
+            )
+
+        if run_ragas:
+            with st.spinner("Generating an answer and scoring it with RAGAS…"):
+                response = application.answer(
+                    question.strip(),
+                    st.session_state.session_id,
+                )
+                ragas_result = evaluator.evaluate_generation(
+                    question=question.strip(),
+                    answer=response.answer,
+                    contexts=response.metadata.get("retrieved_contexts", []),
+                    reference=reference.strip() or None,
+                )
+            st.markdown("**Generated answer**")
+            st.write(response.answer)
+            if ragas_result is not None:
+                st.markdown("**RAGAS metrics**")
+                st.json(ragas_result.model_dump())
+            else:
+                st.warning("RAGAS could not complete. Check the application log for the provider error.")
     except Exception as exc:
+        logger.exception("Evaluation tab failed | question=%r", question.strip())
         st.error(f"Evaluation failed: {exc}")
         if settings.APP_ENV == "development":
             st.exception(exc)
@@ -794,6 +966,7 @@ def main() -> None:
     with chat_tab:
         render_chat_history()
         render_job_description_status()
+        process_pending_search()
         render_chat_input()
     with evaluation_tab:
         render_evaluation_tab()

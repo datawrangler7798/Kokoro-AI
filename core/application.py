@@ -11,9 +11,11 @@ from google import genai
 
 from core.generation.prompt_builder import create_prompt_builder
 from core.guardrails.guardrails import create_guardrails
+from core.ingestion.parsing import parse_pdf, to_langchain_documents
 from core.ingestion.ingestion import create_ingestion_service
 from core.ingestion.registry import DocumentRegistry
 from core.memory.memory_rag import create_memory_rag
+from core.retrieval.hybrid_indexer import create_hybrid_indexer
 from core.retrieval.re_ranker import create_reranker
 from core.retrieval.vector_store import create_vector_store
 from utils.config import get_settings
@@ -27,13 +29,15 @@ from utils.schemas import (
     KokoroResponse,
     OutputValidationResult,
     PromptContext,
+    RetrievalMethod,
     RetrievalResult,
     QueryIntent,
     QueryPlan,
+    SearchFilters,
     SearchDepth,
     ValidationStatus,
 )
-from utils.utils import get_llm_rate_limiter
+from utils.utils import calculate_file_hash, get_llm_rate_limiter
 
 
 logger = get_logger(__name__)
@@ -45,9 +49,18 @@ class KokoroApplication:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.vector_store = create_vector_store()
+        self.hybrid_indexer = create_hybrid_indexer(
+            semantic_retriever=self.vector_store,
+        )
+        try:
+            loaded_bm25_chunks = self.hybrid_indexer.load_bm25()
+            logger.info("Loaded BM25 resume corpus | chunks=%d", loaded_bm25_chunks)
+        except Exception:
+            logger.exception("Could not load the persisted BM25 corpus; it will be rebuilt from local PDFs.")
         self.registry = DocumentRegistry()
         self.ingestion = create_ingestion_service(
             vector_store=self.vector_store,
+            hybrid_indexer=self.hybrid_indexer,
             registry=self.registry,
         )
         self.reranker = create_reranker()
@@ -78,8 +91,50 @@ class KokoroApplication:
             result["total_chunks"],
         )
         if result["successful_files"]:
+            self.hybrid_indexer.save_bm25()
             self.memory.clear_cache()
         return result
+
+    def _backfill_bm25_from_resumes(self, resume_paths: list[Path]) -> int:
+        """Build a missing lexical index without embedding or upserting vectors."""
+
+        chunks_to_index: list[Any] = []
+        for path in resume_paths:
+            try:
+                parsed = parse_pdf(
+                    file_path=path,
+                    document_type=DocumentType.RESUME,
+                    document_hash=calculate_file_hash(path),
+                )
+                documents = to_langchain_documents(parsed)
+                chunks_to_index.extend(self.ingestion.chunk_documents(documents))
+            except Exception:
+                logger.exception("BM25 backfill failed for resume | file=%s", path.name)
+
+        indexed_chunks = self.hybrid_indexer.add_documents(chunks_to_index)
+        if indexed_chunks:
+            self.hybrid_indexer.save_bm25()
+        logger.info("BM25 resume backfill completed | chunks=%d", indexed_chunks)
+        return indexed_chunks
+
+    def _pinecone_vector_count(self, stats: Any) -> int | None:
+        """Read the configured namespace count from Pinecone stats responses."""
+
+        def value(obj: Any, key: str, default: Any = None) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        namespaces = value(stats, "namespaces", {}) or {}
+        namespace_stats = namespaces.get(self.vector_store.namespace)
+        count = value(namespace_stats, "vector_count")
+        if count is not None:
+            return int(count)
+
+        count = value(stats, "total_vector_count")
+        if count is not None:
+            return int(count)
+        return None
 
     def ingest_existing_resumes(
         self,
@@ -125,7 +180,57 @@ class KokoroApplication:
                     progress_callback=report_progress,
                 )
             )
+
+        # Existing vectors are skipped by the document registry. If the local
+        # BM25 corpus is absent (for example, when upgrading from dense-only
+        # retrieval), rebuild only the lexical index from local PDFs.
+        if resume_paths and self.hybrid_indexer.bm25_size() == 0:
+            self._backfill_bm25_from_resumes(resume_paths)
+
         results = [item for batch in batches for item in batch["results"]]
+        try:
+            pinecone_stats = self.vector_store.stats()
+            pinecone_count = self._pinecone_vector_count(pinecone_stats)
+            skipped_files = sum(batch["skipped_files"] for batch in batches)
+            indexed_or_skipped_files = sum(
+                batch["successful_files"] + batch["skipped_files"]
+                for batch in batches
+            )
+
+            # The registry is local bookkeeping. If it says documents exist
+            # but the configured Pinecone namespace is empty, rebuild vectors
+            # from the local PDFs instead of silently keeping search empty.
+            if resume_paths and pinecone_count == 0 and indexed_or_skipped_files:
+                logger.warning(
+                    "Registry/Pinecone mismatch detected | indexed_or_skipped=%d skipped=%d namespace=%r; reindexing local PDFs",
+                    indexed_or_skipped_files,
+                    skipped_files,
+                    self.vector_store.namespace,
+                )
+                self.registry.clear()
+                batches = []
+                if resume_paths:
+                    batches.append(
+                        self.ingest_files(resume_paths, DocumentType.RESUME)
+                    )
+                if jd_paths:
+                    batches.append(
+                        self.ingest_files(jd_paths, DocumentType.JD)
+                    )
+                results = [item for batch in batches for item in batch["results"]]
+                pinecone_stats = self.vector_store.stats()
+                pinecone_count = self._pinecone_vector_count(pinecone_stats)
+
+            logger.info(
+                "Pinecone startup verification | index=%s namespace=%r vector_count=%s stats=%s",
+                self.vector_store.index_name,
+                self.vector_store.namespace,
+                pinecone_count,
+                pinecone_stats,
+            )
+        except Exception:
+            logger.exception("Could not verify Pinecone index stats after startup ingestion.")
+
         return {
             "total_files": sum(batch["total_files"] for batch in batches),
             "processed_files": sum(batch["processed_files"] for batch in batches),
@@ -150,6 +255,23 @@ class KokoroApplication:
         if not text or not text.strip():
             raise RuntimeError("Gemini returned an empty answer.")
         return text.strip()
+
+    @staticmethod
+    def _evidence_based_answer(reranked: list[Any]) -> str:
+        """Format retrieved candidates into a useful answer without an LLM call."""
+
+        if not reranked:
+            return "I found resume matches, but couldn’t summarize them right now. Please try again shortly."
+
+        lines = ["Here are the closest candidates found in the resume library:"]
+        for index, candidate in enumerate(reranked[:5], start=1):
+            name = candidate.candidate_name or candidate.candidate_id
+            lines.append(f"\n{index}. **{name}** (Candidate ID: {candidate.candidate_id})")
+            if candidate.explanation:
+                lines.append(candidate.explanation)
+            for evidence in candidate.evidence[:2]:
+                lines.append(f"- {evidence}")
+        return "\n".join(lines)
 
     def answer(self, query: str, session_id: str) -> KokoroResponse:
         started = time.perf_counter()
@@ -176,20 +298,61 @@ class KokoroApplication:
             cached_response.cache_status = CacheStatus.HIT
             return cached_response
 
-        # Chunk the JD/question, embed each chunk with Gemini Embedding 001,
-        # and search the same Pinecone index used for resume chunks.
+        # Search both dense Pinecone vectors and the persisted BM25 lexical
+        # index, then fuse the candidate chunks before reranking.
         plan = QueryPlan(
             original_query=query,
             intent=QueryIntent.SEARCH,
             search_depth=SearchDepth.SHALLOW,
             top_k=5,
-            reasoning="Chunked Pinecone semantic search using the configured query embedding model.",
+            filters=SearchFilters(document_type=DocumentType.RESUME),
+            reasoning="Hybrid dense Pinecone and BM25 search with weighted score fusion.",
         )
-        retrieved = self.vector_store.similarity_search(
+        hybrid_results = self.hybrid_indexer.search(
             query,
-            top_k=5,
+            top_k=plan.top_k,
+            semantic_top_k=self.settings.VECTOR_TOP_K,
+            keyword_top_k=self.settings.BM25_TOP_K,
             filters=plan.filters,
         )
+        retrieved = [
+            RetrievalResult(
+                chunk_id=item.chunk_id,
+                document_id=str(item.metadata.get("document_id") or item.chunk_id),
+                document_type=DocumentType(
+                    item.metadata.get("document_type", DocumentType.RESUME.value)
+                ),
+                candidate_id=item.metadata.get("candidate_id"),
+                candidate_name=item.metadata.get("candidate_name"),
+                section=item.metadata.get("section"),
+                text=item.content,
+                source_file=item.metadata.get("source_file") or item.metadata.get("source"),
+                page_number=item.metadata.get("page_number") or item.metadata.get("page"),
+                retrieval_method=RetrievalMethod.HYBRID,
+                raw_score=item.hybrid_score,
+                normalized_score=item.hybrid_score,
+                rank=rank,
+                metadata={
+                    **item.metadata,
+                    "semantic_score": item.semantic_score,
+                    "keyword_score": item.keyword_score,
+                    "hybrid_score": item.hybrid_score,
+                },
+            )
+            for rank, item in enumerate(hybrid_results, start=1)
+        ]
+        if not retrieved:
+            try:
+                pinecone_stats = self.vector_store.stats()
+                logger.warning(
+                    "Hybrid retrieval returned no resume matches | index=%s namespace=%r bm25_chunks=%d stats=%s",
+                    self.vector_store.index_name,
+                    self.vector_store.namespace,
+                    self.hybrid_indexer.bm25_size(),
+                    pinecone_stats,
+                )
+            except Exception:
+                logger.exception("Could not inspect Pinecone after an empty search result.")
 
         reranked = self.reranker.rerank(query, retrieved) if retrieved else []
         prompt_context = PromptContext(
@@ -208,10 +371,16 @@ class KokoroApplication:
             ),
         )
         if retrieved:
-            answer = self._generate(
-                prompts["system_prompt"],
-                prompts["user_prompt"],
-            )
+            try:
+                answer = self._generate(
+                    prompts["system_prompt"],
+                    prompts["user_prompt"],
+                )
+            except Exception:
+                logger.exception(
+                    "Gemini answer generation failed; returning grounded resume evidence instead."
+                )
+                answer = self._evidence_based_answer(reranked)
         else:
             answer = "I couldn’t find matching candidate evidence for that request. Try a broader job description or different skill and experience requirements."
 

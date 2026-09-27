@@ -18,6 +18,7 @@ This module does NOT:
 from __future__ import annotations
 
 import math
+import uuid
 from typing import Any, Iterable, Sequence
 
 from utils.config import get_settings
@@ -66,7 +67,7 @@ def precision_at_k(
         if item_id in relevant
     )
 
-    return hits / len(retrieved)
+    return hits / k
 
 
 def recall_at_k(
@@ -289,6 +290,7 @@ class RetrievalEvaluator:
 
         return RetrievalEvaluationResult(
             query=query,
+            retrieval_method="hybrid",
             precision_at_k=precision_scores,
             recall_at_k=recall_scores,
             mrr=mrr,
@@ -342,8 +344,8 @@ class RagasEvaluator:
         try:
             from ragas import evaluate
             from ragas import EvaluationDataset
+            from ragas.llms import llm_factory
             from ragas.metrics import (
-                AnswerRelevancy,
                 ContextPrecision,
                 ContextRecall,
                 Faithfulness,
@@ -369,55 +371,50 @@ class RagasEvaluator:
             [sample]
         )
 
-        metrics = [
-            Faithfulness(),
-            AnswerRelevancy(),
-        ]
-
-        if reference is not None:
-            metrics.extend(
-                [
-                    ContextPrecision(),
-                    ContextRecall(),
-                ]
-            )
-
         try:
+            settings = get_settings()
+            from google import genai
+
+            client = genai.Client(
+                api_key=settings.GOOGLE_API_KEY.get_secret_value()
+            )
+            ragas_llm = llm_factory(
+                settings.LLM_MODEL,
+                provider="google",
+                client=client,
+            )
+            metrics = [Faithfulness(llm=ragas_llm)]
+            if reference is not None:
+                metrics.extend(
+                    [
+                        ContextPrecision(llm=ragas_llm),
+                        ContextRecall(llm=ragas_llm),
+                    ]
+                )
 
             result = evaluate(
                 dataset=dataset,
                 metrics=metrics,
+                llm=ragas_llm,
             )
 
             scores = dict(
                 result.scores[0]
             )
 
+            def optional_score(name: str) -> float | None:
+                value = scores.get(name)
+                if value is None:
+                    return None
+                score = float(value)
+                return score if math.isfinite(score) else None
+
             return RagasEvaluationResult(
-                faithfulness=float(
-                    scores.get(
-                        "faithfulness",
-                        0.0,
-                    )
-                ),
-                answer_relevancy=float(
-                    scores.get(
-                        "answer_relevancy",
-                        0.0,
-                    )
-                ),
-                context_precision=float(
-                    scores.get(
-                        "context_precision",
-                        0.0,
-                    )
-                ),
-                context_recall=float(
-                    scores.get(
-                        "context_recall",
-                        0.0,
-                    )
-                ),
+                sample_id=uuid.uuid4().hex,
+                faithfulness=optional_score("faithfulness"),
+                context_precision=optional_score("context_precision"),
+                context_recall=optional_score("context_recall"),
+                metadata={"provider": "google", "model": settings.LLM_MODEL},
             )
 
         except Exception as exc:
@@ -542,8 +539,11 @@ class Evaluator:
         )
 
         return EvaluationResult(
-            retrieval=retrieval_result,
-            ragas=ragas_result,
+            evaluation_id=uuid.uuid4().hex,
+            retrieval_method="hybrid",
+            k_values=self.retrieval_evaluator.k_values,
+            retrieval_results=[retrieval_result],
+            ragas_results=[ragas_result] if ragas_result else [],
         )
 
 

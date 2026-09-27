@@ -1502,29 +1502,17 @@ class RetrievalEvaluationResult(KokoroBaseModel):
     for a particular retrieval method.
     """
 
-    sample_id: str = Field(
-        ...,
-        min_length=1,
-    )
+    query: str = Field(..., min_length=1)
 
-    retrieval_method: RetrievalMethod
+    retrieval_method: RetrievalMethod = RetrievalMethod.HYBRID
 
-    k: int = Field(
-        ...,
-        ge=1,
-    )
+    precision_at_k: dict[str, float] = Field(default_factory=dict)
 
-    precision_at_k: float = Field(
-        ...,
-        ge=0,
-        le=1,
-    )
+    recall_at_k: dict[str, float] = Field(default_factory=dict)
 
-    recall_at_k: float = Field(
-        ...,
-        ge=0,
-        le=1,
-    )
+    mrr: float = Field(default=0.0, ge=0, le=1)
+
+    ndcg_at_k: dict[str, float] = Field(default_factory=dict)
 
     retrieved_ids: list[str] = Field(
         default_factory=list,
@@ -1550,10 +1538,7 @@ class RagasEvaluationResult(KokoroBaseModel):
     metrics.
     """
 
-    sample_id: str = Field(
-        ...,
-        min_length=1,
-    )
+    sample_id: str = Field(default="interactive", min_length=1)
 
     faithfulness: float | None = Field(
         default=None,

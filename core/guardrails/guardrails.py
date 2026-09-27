@@ -51,6 +51,16 @@ PII_PATTERNS = {
 }
 
 
+# Recruiting requests for sexual services are outside this professional
+# candidate-search application and must be stopped before retrieval.
+UNSUPPORTED_RECRUITING_PATTERNS = (
+    re.compile(r"\b(?:sex\s+work(?:er|ers|r)|sexual\s+workers?)\b", re.IGNORECASE),
+    re.compile(r"\bsex\b", re.IGNORECASE),
+    re.compile(r"\bprostitut(?:e|es|ion)\b", re.IGNORECASE),
+    re.compile(r"\bescorts?\b", re.IGNORECASE),
+)
+
+
 # ============================================================
 # Result Model
 # ============================================================
@@ -189,6 +199,20 @@ class Guardrails:
             )
 
         text = text.strip()
+
+        if any(
+            pattern.search(text)
+            for pattern in UNSUPPORTED_RECRUITING_PATTERNS
+        ):
+            return GuardrailResult(
+                status=GuardrailStatus.BLOCKED,
+                passed=False,
+                reason=(
+                    "Invalid input. Kokoro supports professional recruitment "
+                    "and candidate-search requests only. Please provide a "
+                    "professional job description or a candidate-related question."
+                ),
+            )
 
         # --------------------------------------------------------
         # Prompt Injection

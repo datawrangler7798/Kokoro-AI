@@ -505,6 +505,12 @@ class BM25Backend:
                     scores[index]
                 )
 
+                # BM25 ranks every corpus row, including rows with
+                # no overlapping query terms. Those zero-score rows
+                # are not lexical matches and must not enter fusion.
+                if score <= 0.0:
+                    break
+
                 record_id = (
                     self._record_ids[
                         index
@@ -1034,11 +1040,24 @@ class HybridIndexer:
     ) -> BM25Record:
         """Convert an ingestion chunk into a BM25 record."""
 
+        metadata = (
+            cls._extract_value(
+                chunk,
+                "metadata",
+                {},
+            )
+            or {}
+        )
+        if hasattr(metadata, "model_dump"):
+            metadata = metadata.model_dump()
+        metadata = dict(metadata)
+
         chunk_id = (
             cls._extract_value(
                 chunk,
                 "chunk_id",
             )
+            or metadata.get("chunk_id")
             or cls._extract_value(
                 chunk,
                 "id",
@@ -1059,6 +1078,10 @@ class HybridIndexer:
                 chunk,
                 "text",
             )
+            or cls._extract_value(
+                chunk,
+                "page_content",
+            )
             or ""
         )
 
@@ -1066,25 +1089,6 @@ class HybridIndexer:
             raise ValueError(
                 f"Chunk {chunk_id} has empty text."
             )
-
-        metadata = (
-            cls._extract_value(
-                chunk,
-                "metadata",
-                {},
-            )
-            or {}
-        )
-
-        if hasattr(
-            metadata,
-            "model_dump",
-        ):
-            metadata = metadata.model_dump()
-
-        metadata = dict(
-            metadata
-        )
 
         # Keep important retrieval metadata available
         # even when it was supplied as top-level fields.

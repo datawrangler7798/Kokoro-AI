@@ -823,12 +823,21 @@ class PineconeVectorStore:
                 for record in batch
             ]
 
-            self.index.upsert(
+            upsert_response = self.index.upsert(
                 vectors=payload,
                 namespace=self.namespace,
             )
 
-            total_upserted += len(batch)
+            acknowledged = getattr(upsert_response, "upserted_count", None)
+            if acknowledged is None and isinstance(upsert_response, Mapping):
+                acknowledged = upsert_response.get("upserted_count")
+            if acknowledged is not None and int(acknowledged) != len(batch):
+                raise RuntimeError(
+                    "Pinecone acknowledged an unexpected vector count: "
+                    f"expected={len(batch)} acknowledged={acknowledged}."
+                )
+
+            total_upserted += int(acknowledged) if acknowledged is not None else len(batch)
 
             logger.debug(
                 "Upserted Pinecone batch: %d vectors.",
@@ -836,7 +845,9 @@ class PineconeVectorStore:
             )
 
         logger.info(
-            "Pinecone upsert completed: %d vectors.",
+            "Pinecone upsert acknowledged: index=%s namespace=%r vectors=%d.",
+            self.index_name,
+            self.namespace,
             total_upserted,
         )
 
@@ -1185,7 +1196,7 @@ class PineconeVectorStore:
         )
 
         best_matches: dict[str, VectorSearchMatch] = {}
-        for vector in query_vectors:
+        for chunk_number, vector in enumerate(query_vectors, start=1):
             response = self.index.query(
                 vector=vector,
                 top_k=k,
@@ -1194,7 +1205,16 @@ class PineconeVectorStore:
                 include_metadata=True,
                 include_values=False,
             )
-            for match in self._parse_matches(response):
+            parsed_matches = self._parse_matches(response)
+            logger.info(
+                "Pinecone query response | index=%s namespace=%r query_chunk=%d/%d matches=%d",
+                self.index_name,
+                self.namespace,
+                chunk_number,
+                len(query_vectors),
+                len(parsed_matches),
+            )
+            for match in parsed_matches:
                 current = best_matches.get(match.vector_id)
                 if current is None or match.score > current.score:
                     best_matches[match.vector_id] = match
@@ -1314,9 +1334,9 @@ class PineconeVectorStore:
     def stats(self) -> Any:
         """Return Pinecone index statistics."""
 
-        return self.index.describe_index_stats(
-            namespace=self.namespace
-        )
+        # Pinecone's current Index API does not accept namespace here;
+        # namespace counts are included in the returned stats mapping.
+        return self.index.describe_index_stats()
 
 
 # ============================================================
