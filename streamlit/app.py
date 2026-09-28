@@ -33,6 +33,7 @@ from pathlib import Path
 # from utils...
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ASSISTANT_AVATAR = PROJECT_ROOT / "streamlit" / "assets" / "assistant-avatar.png"
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -67,19 +68,9 @@ SESSION_ID_PATTERN = re.compile(r"^KK(\d+)$")
 SESSION_COUNTER_LOCK = threading.Lock()
 
 WELCOME_MESSAGE = (
-    "Hi! How are you? I’m your resume search assistant. "
-    "To get started, paste the job description in this chat. "
-    "I’ll compare it with the indexed resumes and find relevant candidates."
+    "Hi, I’m Kira, the recruiting assistant for Kokoro AI. "
+    "Tell me what kind of candidate you’re looking for, and I’ll search the resume library."
 )
-
-RECRUITMENT_SCOPE_PATTERN = re.compile(
-    r"\b(candidate|applicant|resume|cv|job|role|position|recruit(?:er|ment)?|"
-    r"hir(?:e|ing)|skill|experience|qualification|salary|responsibilit(?:y|ies)|"
-    r"interview|accountant|accounting|engineer|developer|designer|analyst|manager|"
-    r"sales|nurse|teacher|technician|intern|employee|career)\b",
-    re.IGNORECASE,
-)
-
 
 def welcome_messages() -> list[dict[str, str]]:
     return [{"role": "assistant", "content": WELCOME_MESSAGE}]
@@ -129,32 +120,14 @@ def looks_like_job_description(message: str) -> bool:
     )
     return (
         len(message.strip()) >= 500
-        and bool(RECRUITMENT_SCOPE_PATTERN.search(message))
     ) or (
         len(message.strip()) >= 180
         and any(heading in normalized for heading in jd_headings)
     )
 
 
-def is_recruitment_related(message: str) -> bool:
-    """Keep unrelated chat text from entering recruiter retrieval."""
-
-    if looks_like_job_description(message):
-        return True
-    if RECRUITMENT_SCOPE_PATTERN.search(message):
-        return True
-    return bool(
-        re.search(
-            r"\b(?:who|which)\s+(?:is|has|are|have|would|should)\b|"
-            r"\b(?:compare|rank|shortlist)\b",
-            message,
-            re.IGNORECASE,
-        )
-    )
-
-
 def create_session_id(existing_ids: list[str] | None = None) -> str:
-    """Return the next persistent sequential session ID (KK0001, KK0002, ...)."""
+    """Return the next persistent sequential session ID (KK00001, KK00002, ...)."""
 
     if existing_ids is None:
         existing_ids = []
@@ -192,7 +165,7 @@ def create_session_id(existing_ids: list[str] | None = None) -> str:
         )
         temporary_path.replace(SESSION_COUNTER_PATH)
 
-    return f"KK{next_number:04d}"
+    return f"KK{next_number:05d}"
 
 
 # ============================================================
@@ -217,6 +190,9 @@ def initialize_session() -> None:
     if "recent_sessions" not in st.session_state:
         st.session_state.recent_sessions = [st.session_state.session_id]
 
+    if "ended_sessions" not in st.session_state:
+        st.session_state.ended_sessions = set()
+
     if "session_messages" not in st.session_state:
         st.session_state.session_messages = {
             st.session_state.session_id: st.session_state.messages
@@ -233,18 +209,19 @@ def initialize_session() -> None:
             st.session_state.session_id: st.session_state.job_description
         }
 
-    # Migrate existing UUID chats so every visible session uses the KK#### format.
+    # Normalize older IDs so visible sessions use the KK##### format.
     current_id = st.session_state.session_id
     all_ids = list(dict.fromkeys([
         *st.session_state.recent_sessions,
         *st.session_state.session_messages.keys(),
         *st.session_state.session_job_descriptions.keys(),
+        *st.session_state.ended_sessions,
         current_id,
     ]))
     id_mapping: dict[str, str] = {}
     for old_id in all_ids:
         if SESSION_ID_PATTERN.fullmatch(str(old_id)):
-            id_mapping[old_id] = old_id
+            id_mapping[old_id] = f"KK{int(old_id[2:]):05d}"
         else:
             id_mapping[old_id] = create_session_id(
                 existing_ids=all_ids + list(id_mapping.values())
@@ -257,6 +234,10 @@ def initialize_session() -> None:
     st.session_state.session_job_descriptions = {
         id_mapping.get(session_id, session_id): job_description
         for session_id, job_description in st.session_state.session_job_descriptions.items()
+    }
+    st.session_state.ended_sessions = {
+        id_mapping.get(session_id, session_id)
+        for session_id in st.session_state.ended_sessions
     }
     st.session_state.session_id = id_mapping[current_id]
     st.session_state.recent_sessions = list(dict.fromkeys(
@@ -375,15 +356,12 @@ def render_header() -> None:
     Render application header.
     """
 
-    app_name = getattr(settings, "APP_NAME", "Kokoro")
     st.markdown(
         f"""
         <div class="kokoro-hero">
-          <div class="kokoro-mark">K</div>
           <div>
-            <div class="kokoro-eyebrow">TALENT INTELLIGENCE</div>
-            <div class="kokoro-title">{escape(str(app_name))} <span>Recruiting</span></div>
-            <div class="kokoro-subtitle">Find the right people in your resume library.</div>
+            <div class="kokoro-title">Kokoro AI</div>
+            <div class="kokoro-subtitle">Understanding the person behind the resume.</div>
           </div>
         </div>
         """,
@@ -396,47 +374,58 @@ def render_header() -> None:
 # ============================================================
 
 
+def save_current_session() -> None:
+    st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
+    st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
+
+
+def start_new_session() -> None:
+    save_current_session()
+    new_id = create_session_id()
+    st.session_state.session_id = new_id
+    st.session_state.recent_sessions.insert(0, new_id)
+    st.session_state.messages = welcome_messages()
+    st.session_state.job_description = None
+    st.session_state.pending_search = None
+    st.session_state.session_messages[new_id] = st.session_state.messages
+    st.session_state.session_job_descriptions[new_id] = None
+    st.rerun()
+
+
 def render_sidebar() -> None:
     """
     Render sidebar controls.
     """
 
-    st.sidebar.header("Session")
-
-    st.sidebar.text(
-        f"Session ID: {st.session_state.session_id}"
+    st.sidebar.markdown("## HIRE AI")
+    st.sidebar.caption("Recruiter workspace")
+    st.sidebar.markdown("#### Current session")
+    chat_started = any(
+        message.get("role") == "user"
+        for message in st.session_state.messages
     )
+    if chat_started:
+        st.sidebar.caption(f"Session ID · {st.session_state.session_id}")
 
-    if st.sidebar.button("New chat", width="stretch"):
-        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
-        st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
-        new_id = create_session_id()
-        st.session_state.session_id = new_id
-        st.session_state.recent_sessions.insert(0, new_id)
-        st.session_state.messages = welcome_messages()
-        st.session_state.job_description = None
-        st.session_state.session_messages[new_id] = st.session_state.messages
-        st.session_state.session_job_descriptions[new_id] = None
+    if st.sidebar.button("New chat", type="primary", width="stretch"):
+        start_new_session()
+
+    is_ended = st.session_state.session_id in st.session_state.ended_sessions
+    if st.sidebar.button(
+        "End chat",
+        width="stretch",
+        disabled=is_ended,
+        help="End this chat and keep its history isolated from new chats.",
+    ):
+        save_current_session()
+        st.session_state.ended_sessions.add(st.session_state.session_id)
+        st.session_state.pending_search = None
         st.rerun()
 
-    if len(st.session_state.recent_sessions) > 1:
-        selected = st.sidebar.selectbox(
-            "Recent chats",
-            st.session_state.recent_sessions,
-            format_func=lambda value: f"Chat {value[:8]}",
-            index=st.session_state.recent_sessions.index(st.session_state.session_id),
-        )
-        if selected != st.session_state.session_id:
-            st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
-            st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
-            st.session_state.session_id = selected
-            st.session_state.messages = st.session_state.session_messages.get(selected, welcome_messages())
-            st.session_state.job_description = st.session_state.session_job_descriptions.get(selected)
-            st.rerun()
-
     if st.sidebar.button(
-        "Clear Conversation",
+        "Clear chat session",
         width="stretch",
+        help="Remove the messages and search context from this session.",
     ):
 
         get_application().memory.clear_session(
@@ -445,6 +434,7 @@ def render_sidebar() -> None:
 
         st.session_state.messages = welcome_messages()
         st.session_state.job_description = None
+        st.session_state.ended_sessions.discard(st.session_state.session_id)
         st.session_state.session_job_descriptions[st.session_state.session_id] = None
         st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
 
@@ -452,9 +442,21 @@ def render_sidebar() -> None:
 
         st.rerun()
 
-    st.sidebar.divider()
-    st.sidebar.markdown("### Recruiter workspace")
-    st.sidebar.caption("Search candidate profiles by sharing a job description in chat.")
+    if is_ended:
+        st.sidebar.info("This chat has ended. Start a new chat to continue.")
+
+    if chat_started:
+        with st.sidebar.expander("Active session debug"):
+            st.caption("Only the active session is shown here.")
+            st.code(st.session_state.session_id, language=None)
+            st.write(
+                {
+                    "status": "ended" if is_ended else "active",
+                    "messages": len(st.session_state.messages),
+                    "job description": "attached" if st.session_state.job_description else "not attached",
+                    "search pending": st.session_state.pending_search is not None,
+                }
+            )
 
 
 # ============================================================
@@ -479,7 +481,12 @@ def render_chat_history() -> None:
             "",
         )
 
-        with st.chat_message(role):
+        if role == "assistant":
+            message_container = st.chat_message(role, avatar=str(ASSISTANT_AVATAR))
+        else:
+            message_container = st.chat_message(role)
+
+        with message_container:
             if role == "user" and (
                 message.get("kind") == "job_description"
                 or looks_like_job_description(content)
@@ -499,13 +506,20 @@ def render_chat_history() -> None:
 
 
 def render_job_description_status() -> None:
-    """Show the active job description and allow replacing it from chat."""
+    """Show search context after the user starts chatting."""
+
+    chat_started = any(
+        message.get("role") == "user"
+        for message in st.session_state.messages
+    )
+    if not chat_started:
+        return
 
     if not st.session_state.job_description:
         st.markdown(
             '<div class="jd-prompt"><span class="jd-prompt-icon">✦</span>'
-            '<div><strong>Start with a job description</strong><br>'
-            '<span>Paste it in the message box below and I’ll search your resumes.</span></div></div>',
+            '<div><strong>Add a job description for more context</strong><br>'
+            '<span>Paste one in the chat when you’re ready. Quick candidate searches work too.</span></div></div>',
             unsafe_allow_html=True,
         )
         return
@@ -676,7 +690,7 @@ def process_pending_search() -> None:
     # Clear first so a Streamlit rerun or recoverable exception cannot submit
     # the same search twice.
     st.session_state.pending_search = None
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar=str(ASSISTANT_AVATAR)):
         if pending["job_description_changed"]:
             st.markdown("**Job description updated.** I’m searching the resume library now.")
         with st.spinner("Searching your resume library..."):
@@ -721,10 +735,14 @@ def process_pending_search() -> None:
 def render_chat_input() -> None:
     """Render the input and queue new searches for the next UI pass."""
 
+    chat_started = any(
+        message.get("role") == "user"
+        for message in st.session_state.messages
+    )
     query = st.chat_input(
-        "Paste the job description to get started..."
-        if not st.session_state.job_description
-        else "Ask about candidates, skills, or paste a new job description..."
+        "Type a recruiting request to start..."
+        if not chat_started
+        else "Ask about candidates, skills, or paste a job description..."
     )
     if not query or not query.strip():
         return
@@ -733,9 +751,9 @@ def render_chat_input() -> None:
     if is_greeting(query):
         st.session_state.messages.append({"role": "user", "content": query})
         greeting_reply = (
-            "Hello! I’m ready to help with candidates for the active job description. What would you like to know?"
+            "Hi, I’m Kira. I’m ready to help with candidates for the active job description. What would you like to know?"
             if st.session_state.job_description
-            else "Hello! Please paste the job description here, and I’ll look for matching candidates in your resume library."
+            else "Hi, I’m Kira, Kokoro AI’s recruiting assistant. Ask me for a candidate profile or paste a job description, and I’ll search your resume library."
         )
         st.session_state.messages.append({"role": "assistant", "content": greeting_reply})
         st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
@@ -756,45 +774,28 @@ def render_chat_input() -> None:
         st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
         st.rerun()
 
-    if not is_recruitment_related(query):
-        invalid_reply = (
-            "Invalid input. I can only help with professional job descriptions "
-            "and candidate-search questions. Please enter a recruiting-related request."
-        )
-        st.session_state.messages.extend(
-            [
-                {"role": "user", "content": query},
-                {"role": "assistant", "content": invalid_reply},
-            ]
-        )
-        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
-        st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
-        st.rerun()
-
     is_new_jd = not st.session_state.job_description
     is_replacement_jd = bool(
         st.session_state.job_description and looks_like_job_description(query)
     )
-    job_description_changed = is_new_jd or is_replacement_jd
-
-    if is_new_jd and not looks_like_job_description(query):
-        st.session_state.messages.append({"role": "user", "content": query})
-        prompt = "Hello! Please share the job description, and I’ll search your resume library for matching candidates."
-        st.session_state.messages.append({"role": "assistant", "content": prompt})
-        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
-        st.session_state.session_job_descriptions[st.session_state.session_id] = None
-        st.rerun()
+    job_description_changed = bool(
+        looks_like_job_description(query) and (is_new_jd or is_replacement_jd)
+    )
 
     if job_description_changed:
         st.session_state.job_description = query
         st.session_state.session_job_descriptions[st.session_state.session_id] = query
         search_query = query
         user_message = {"role": "user", "content": query, "kind": "job_description"}
-    else:
+    elif st.session_state.job_description:
         search_query = (
             f"Job description:\n{st.session_state.job_description}\n\n"
             f"Recruiter question:\n{query}"
         )
+        user_message = {"role": "user", "content": query}
+    else:
+        # A short candidate search can run on its own; a full JD is optional.
+        search_query = query
         user_message = {"role": "user", "content": query}
 
     st.session_state.messages.append(user_message)
@@ -919,26 +920,50 @@ def render_styles() -> None:
     st.markdown(
         """
         <style>
-        :root { --primary-color: #1769aa; }
-        .stApp { background: #f5f8fc; }
+        :root { --brand: #2563eb; --ink: #14243a; --muted: #64748b; --line: #e2e8f0; }
+        .stApp { background: linear-gradient(180deg, #e9eef5 0%, #e5ebf3 44%, #edf1f7 100%); color: var(--ink); }
         [data-testid="stHeader"] { background: transparent; }
-        [data-testid="stSidebar"] { background: #fff; border-right: 1px solid #e4eaf2; }
-        .block-container { max-width: 1180px; padding-top: 1.5rem; padding-bottom: 3rem; }
-        .kokoro-hero { display:flex; align-items:center; gap:16px; padding:4px 0 20px; border-bottom:1px solid #e3eaf3; margin-bottom:22px; }
-        .kokoro-mark { width:46px; height:46px; display:grid; place-items:center; border-radius:13px; color:white; font-size:23px; font-weight:800; background:linear-gradient(135deg,#1267a5,#258ed0); box-shadow:0 7px 18px #1769aa2b; }
-        .kokoro-eyebrow { color:#1769aa; font-size:10px; font-weight:800; letter-spacing:1.8px; }
-        .kokoro-title { color:#18334d; font-size:26px; font-weight:750; line-height:1.25; }
-        .kokoro-title span { color:#62758a; font-weight:500; }
-        .kokoro-subtitle { color:#65788d; font-size:14px; margin-top:3px; }
-        .jd-prompt { display:flex; gap:14px; align-items:center; margin:12px 0 18px; padding:18px 20px; border:1px solid #dce6f0; border-radius:14px; background:#fff; color:#243b53; box-shadow:0 4px 16px #18334d09; }
-        .jd-prompt-icon { display:grid; place-items:center; flex:0 0 38px; height:38px; border-radius:11px; color:#1769aa; background:#edf5fb; font-size:20px; }
+        [data-testid="stSidebar"] { background: rgba(222,230,240,.97); border-right: 1px solid #cbd5e1; }
+        [data-testid="stSidebar"] > div { padding-top: 1.3rem; }
+        .block-container { max-width: 1240px; padding: 1.6rem 2rem 4rem; }
+        .kokoro-hero { display:flex; align-items:center; gap:14px; padding:5px 0 20px; border-bottom:1px solid var(--line); margin-bottom:24px; }
+        .kokoro-title { color:var(--brand); font-size:27px; font-weight:800; letter-spacing:.02em; line-height:1.2; }
+        .kokoro-subtitle { color:var(--muted); font-size:14px; margin-top:4px; }
+        .jd-prompt { display:flex; gap:14px; align-items:center; margin:12px 0 20px; padding:18px 20px; border:1px solid #cbd8e8; border-radius:18px; background:linear-gradient(115deg,#f8fafc 0%,#e8f0fa 100%); color:#243b53; box-shadow:0 8px 24px #1e3a5f12; }
+        .jd-prompt-icon { display:grid; place-items:center; flex:0 0 40px; height:40px; border-radius:13px; color:#1d4ed8; background:#e6f0ff; font-size:20px; }
         .jd-prompt span { color:#64748b; font-size:13px; }
-        [data-testid="stChatMessage"] { border:1px solid #e3eaf1; border-radius:15px; padding:14px 18px; background:#fff; box-shadow:0 3px 12px #18334d08; }
-        [data-testid="stChatInput"] { border-radius:13px; }
+        [data-testid="stChatMessage"] { border:1px solid var(--line); border-radius:18px; padding:15px 18px; background:rgba(255,255,255,.96); box-shadow:0 5px 18px #18334d0a; }
+        [data-testid="stChatMessageAvatarUser"] { background:#3b82f6 !important; color:#fff !important; }
+        [data-testid="stChatInput"] { border-radius:16px; }
+        [data-testid="stTabs"] [role="tablist"] { gap:8px; border-bottom:1px solid var(--line); }
         [data-testid="stTabs"] button { font-weight:650; }
-        [data-testid="stTabs"] button[aria-selected="true"] { color:#1769aa; border-bottom-color:#1769aa; }
-        [data-testid="stSidebar"] button { border-radius:9px; }
-        div[data-testid="stMetric"] { background:#f8fafc; border:1px solid #e4ebf2; padding:12px 14px; border-radius:12px; }
+        [data-testid="stTabs"] button[aria-selected="true"] { color:var(--brand); border-bottom-color:var(--brand); }
+        [data-testid="stSidebar"] button, .stButton button, [data-testid="stFormSubmitButton"] button { border-radius:11px; }
+        .stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] { box-shadow:0 5px 14px #2563eb24; }
+        div[data-testid="stMetric"] { background:#fff; border:1px solid var(--line); padding:13px 15px; border-radius:14px; box-shadow:0 4px 14px #18334d08; }
+        [data-testid="stVerticalBlockBorderWrapper"] { border-radius:16px; border-color:var(--line); background:rgba(255,255,255,.78); }
+        [data-testid="stExpander"] { border-color:var(--line); border-radius:13px; background:rgba(255,255,255,.72); }
+        input, textarea, [data-baseweb="select"] > div { border-radius:11px !important; }
+        @media (max-width: 768px) {
+          .block-container { padding:1rem 1rem 2.5rem; }
+          .kokoro-hero { gap:12px; margin-bottom:18px; padding-bottom:17px; }
+          .kokoro-title { font-size:22px; }
+          .kokoro-subtitle { font-size:13px; }
+          .jd-prompt { align-items:flex-start; padding:15px; border-radius:15px; }
+          [data-testid="stChatMessage"] { padding:12px; border-radius:15px; }
+          [data-testid="stHorizontalBlock"] { flex-wrap:wrap; gap:.65rem; }
+          [data-testid="stHorizontalBlock"] > [data-testid="column"] { min-width:min(100%, 240px); }
+          div[data-testid="stMetric"] { padding:10px 12px; }
+          [data-testid="stTabs"] [role="tablist"] { gap:2px; }
+        }
+        @media (max-width: 480px) {
+          .block-container { padding:.75rem .75rem 2rem; }
+          .kokoro-title { font-size:19px; }
+          .kokoro-subtitle { font-size:12px; }
+          .jd-prompt { gap:10px; padding:13px; }
+          [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] { overflow-wrap:anywhere; }
+          [data-testid="stTabs"] button { font-size:13px; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -950,12 +975,23 @@ def main() -> None:
     Streamlit application entry point.
     """
 
-    st.set_page_config(page_title=settings.APP_NAME, page_icon=":material/person_search:")
+    st.set_page_config(
+        page_title=settings.APP_NAME,
+        page_icon=":material/person_search:",
+        layout="wide",
+    )
     initialize_session()
 
     render_styles()
     render_header()
     render_sidebar()
+
+    with st.container(border=True):
+        st.markdown("### Your recruiting workspace")
+        st.write(
+            "Search your resume library in plain language, review evidence-backed "
+            "candidate matches in chat, or use Evaluation to check search quality."
+        )
 
     # --------------------------------------------------------
     # Initialize existing resumes
@@ -965,9 +1001,12 @@ def main() -> None:
     chat_tab, evaluation_tab = st.tabs(["Recruiter chat", "Evaluation"])
     with chat_tab:
         render_chat_history()
-        render_job_description_status()
-        process_pending_search()
-        render_chat_input()
+        if st.session_state.session_id in st.session_state.ended_sessions:
+            st.info("This chat has ended. Choose **New chat** to start another session.")
+        else:
+            render_job_description_status()
+            process_pending_search()
+            render_chat_input()
     with evaluation_tab:
         render_evaluation_tab()
 

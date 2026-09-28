@@ -344,7 +344,7 @@ class RagasEvaluator:
         try:
             from ragas import evaluate
             from ragas import EvaluationDataset
-            from ragas.llms import llm_factory
+            from ragas.llms import LangchainLLMWrapper
             from ragas.metrics import (
                 ContextPrecision,
                 ContextRecall,
@@ -373,16 +373,14 @@ class RagasEvaluator:
 
         try:
             settings = get_settings()
-            from google import genai
+            from langchain_google_genai import ChatGoogleGenerativeAI
 
-            client = genai.Client(
-                api_key=settings.GOOGLE_API_KEY.get_secret_value()
+            google_llm = ChatGoogleGenerativeAI(
+                model=settings.LLM_MODEL,
+                google_api_key=settings.GOOGLE_API_KEY.get_secret_value(),
+                temperature=settings.LLM_TEMPERATURE,
             )
-            ragas_llm = llm_factory(
-                settings.LLM_MODEL,
-                provider="google",
-                client=client,
-            )
+            ragas_llm = LangchainLLMWrapper(google_llm)
             metrics = [Faithfulness(llm=ragas_llm)]
             if reference is not None:
                 metrics.extend(
