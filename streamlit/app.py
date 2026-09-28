@@ -204,6 +204,9 @@ def initialize_session() -> None:
     if "pending_search" not in st.session_state:
         st.session_state.pending_search = None
 
+    if "job_prompt_seen_sessions" not in st.session_state:
+        st.session_state.job_prompt_seen_sessions = set()
+
     if "session_job_descriptions" not in st.session_state:
         st.session_state.session_job_descriptions = {
             st.session_state.session_id: st.session_state.job_description
@@ -502,6 +505,11 @@ def render_job_description_status() -> None:
         return
 
     if not st.session_state.job_description:
+        session_id = st.session_state.session_id
+        if session_id in st.session_state.job_prompt_seen_sessions:
+            return
+
+        st.session_state.job_prompt_seen_sessions.add(session_id)
         st.markdown(
             '<div class="jd-prompt"><span class="jd-prompt-icon">✦</span>'
             '<div><strong>Add a job description for more context</strong><br>'
