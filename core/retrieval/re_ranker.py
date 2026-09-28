@@ -61,6 +61,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import datetime
 from typing import Any, Optional
 
 from google import genai
@@ -70,12 +71,26 @@ from utils.config import settings
 from utils.logger import get_logger
 from utils.utils import get_llm_rate_limiter
 from utils.schemas import (
+    CandidateFitScores,
     RerankResult,
     RetrievalResult,
 )
 
 
 logger = get_logger(__name__)
+
+
+class RerankResults(list[RerankResult]):
+    """List-compatible reranker output with optional service diagnostics."""
+
+    def __init__(
+        self,
+        results: list[RerankResult] | None = None,
+        *,
+        service_notice: str | None = None,
+    ) -> None:
+        super().__init__(results or [])
+        self.service_notice = service_notice
 
 
 # ============================================================
@@ -99,6 +114,18 @@ class GeminiReranker:
 
     It does not perform retrieval itself.
     """
+
+    MIN_MATCH_SCORE = 0.45
+    # Keyword-only results max out at 0.40 because hybrid fusion gives BM25
+    # a 40% weight. Keep a lower but meaningful floor for Gemini outages.
+    MIN_FALLBACK_SCORE = 0.04
+    SCORE_WEIGHTS = {
+        "role_relevance": 0.30,
+        "skills_match": 0.35,
+        "experience_match": 0.20,
+        "domain_relevance": 0.10,
+        "evidence_strength": 0.05,
+    }
 
     def __init__(
         self,
@@ -165,12 +192,6 @@ class GeminiReranker:
                 "Reranker query cannot be empty."
             )
 
-        if not results:
-
-            raise ValueError(
-                "Reranker requires at least one "
-                "retrieval result."
-            )
 
     # ========================================================
     # TOP-K
@@ -285,9 +306,10 @@ IMPORTANT RULES
 7. Explanations must be evidence-based.
 8. Use only the supplied evidence.
 9. Do not use outside knowledge.
-10. Match score must be a number from 0.0 to 1.0.
-11. Return one result per candidate represented in the
-    retrieved evidence.
+10. Score fit dimensions from 0 to 100 using explicit resume evidence; missing evidence must lower the score and be stated as a gap.
+11. Return an empty results list if no candidate is a
+    meaningful match. Do not treat generic experience or
+    unrelated keyword overlap as a match.
 12. Preserve candidate_id and candidate_name from the
     supplied evidence.
 13. source_chunk_ids must contain only supplied chunk IDs.
@@ -301,10 +323,20 @@ Expected structure:
         {{
             "candidate_id": "candidate_id",
             "candidate_name": "Candidate Name",
-            "match_score": 0.0,
+            "profile_summary": "Brief evidence-based resume profile",
+            "fit_scores": {{
+                "role_relevance": 0,
+                "skills_match": 0,
+                "experience_match": 0,
+                "domain_relevance": 0,
+                "evidence_strength": 0
+            }},
             "matched_skills": [],
             "missing_skills": [],
-            "experience_match": false,
+            "advantages": [],
+            "gaps": [],
+            "recommendation": "",
+            "experience_match": "Evidence-based experience assessment",
             "explanation": "Evidence-based explanation.",
             "evidence": [
                 "Evidence-supported statement."
@@ -317,6 +349,8 @@ Expected structure:
 
 Do not return markdown.
 Do not return additional fields.
+
+The application calculates the final score with these weights: role relevance 30%, skills match 35%, experience match 20%, domain relevance 10%, and evidence strength 5%. Do not return a separate total score. Score only requirements stated or clearly implied by the recruiter query. Use a neutral 50 for dimensions the query does not specify, and say they were not assessed instead of inventing requirements. The profile summary, advantages, gaps, recommendation, and explanation must come from resume evidence.
 """.strip()
 
     # ========================================================
@@ -420,45 +454,16 @@ Do not return additional fields.
     # ========================================================
 
     @staticmethod
-    def _normalize_score(
-        score: Any,
-    ) -> float:
-        """
-        Normalize the model score to [0, 1].
-
-        The architecture example shows a score such as 91,
-        while Kokoro's structured schema uses a normalized
-        score. Therefore:
-
-            91 -> 0.91
-            0.91 -> 0.91
-        """
-
+    def _normalize_component_score(score: Any) -> float:
+        """Accept a 0..1 or 0..100 fit score and return 0..100."""
         try:
-
-            value = float(
-                score
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ) as exc:
-
-            raise ValueError(
-                f"Invalid match_score: {score}"
-            ) from exc
-
-        if value > 1.0 and value <= 100.0:
-
-            value = value / 100.0
-
-        if value < 0.0 or value > 1.0:
-
-            raise ValueError(
-                "match_score must be between 0 and 1."
-            )
-
+            value = float(score)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid fit dimension score: {score}") from exc
+        if 0 <= value <= 1:
+            value *= 100
+        if not 0 <= value <= 100:
+            raise ValueError("Fit dimension scores must be between 0 and 100.")
         return value
 
     # ========================================================
@@ -521,8 +526,8 @@ Do not return additional fields.
         chunk references.
         """
 
-        valid_chunk_ids = {
-            result.chunk_id
+        retrieved_by_chunk = {
+            result.chunk_id: result
             for result in retrieved_results
         }
 
@@ -531,7 +536,7 @@ Do not return additional fields.
             invalid_ids = [
                 chunk_id
                 for chunk_id in result.source_chunk_ids
-                if chunk_id not in valid_chunk_ids
+                if chunk_id not in retrieved_by_chunk
             ]
 
             if invalid_ids:
@@ -541,6 +546,27 @@ Do not return additional fields.
                     "that were not present in retrieved evidence: "
                     f"{invalid_ids}"
                 )
+
+            for chunk_id in result.source_chunk_ids:
+                source = retrieved_by_chunk[chunk_id]
+                source_candidate_id = source.candidate_id or source.metadata.get("candidate_id")
+                if source_candidate_id and str(source_candidate_id) != result.candidate_id:
+                    raise ValueError(
+                        "Reranker attached evidence to the wrong candidate: "
+                        f"candidate_id={result.candidate_id} chunk_id={chunk_id}"
+                    )
+
+                source_name = source.candidate_name or source.metadata.get("candidate_name")
+                if (
+                    source_name
+                    and result.candidate_name
+                    and str(source_name).strip().casefold()
+                    != result.candidate_name.strip().casefold()
+                ):
+                    raise ValueError(
+                        "Reranker candidate_name does not match its source evidence: "
+                        f"candidate_id={result.candidate_id} chunk_id={chunk_id}"
+                    )
 
     # ========================================================
     # CANDIDATE NORMALIZATION
@@ -585,13 +611,18 @@ Do not return additional fields.
                 "Reranker result is missing candidate_name."
             )
 
-        match_score = (
-            cls._normalize_score(
-                raw.get(
-                    "match_score"
-                )
-            )
-        )
+        raw_scores = raw.get("fit_scores")
+        if not isinstance(raw_scores, dict) or not set(cls.SCORE_WEIGHTS).issubset(raw_scores):
+            raise ValueError("Reranker result must include all fit_scores dimensions.")
+        score_values = {
+            key: cls._normalize_component_score(raw_scores[key])
+            for key in cls.SCORE_WEIGHTS
+        }
+        score_breakdown = CandidateFitScores(**score_values)
+        match_score = sum(
+            score_values[key] * weight
+            for key, weight in cls.SCORE_WEIGHTS.items()
+        ) / 100
 
         matched_skills = (
             cls._normalize_string_list(
@@ -601,6 +632,8 @@ Do not return additional fields.
             )
         )
 
+        profile_summary = str(raw.get("profile_summary", "")).strip()
+
         missing_skills = (
             cls._normalize_string_list(
                 raw.get(
@@ -608,6 +641,12 @@ Do not return additional fields.
                 )
             )
         )
+
+        advantages = cls._normalize_string_list(raw.get("advantages", []))
+        gaps = cls._normalize_string_list(raw.get("gaps", missing_skills))
+        recommendation = str(raw.get("recommendation", "")).strip()
+        if not recommendation:
+            raise ValueError("Reranker result must include a recruiter recommendation.")
 
         evidence = (
             cls._normalize_string_list(
@@ -661,9 +700,14 @@ Do not return additional fields.
             candidate_name=str(
                 candidate_name
             ),
+            profile_summary=profile_summary or None,
             match_score=match_score,
+            score_breakdown=score_breakdown,
             matched_skills=matched_skills,
             missing_skills=missing_skills,
+            advantages=advantages,
+            gaps=gaps,
+            recommendation=recommendation,
             experience_match=experience_match,
             explanation=explanation,
             evidence=evidence,
@@ -704,10 +748,7 @@ Do not return additional fields.
             )
 
         if not raw_results:
-
-            raise ValueError(
-                "Reranker returned no candidates."
-            )
+            return []
 
         reranked: list[
             RerankResult
@@ -750,6 +791,11 @@ Do not return additional fields.
             retrieved_results=retrieved_results,
         )
 
+        reranked = [
+            result for result in reranked
+            if result.match_score >= cls.MIN_MATCH_SCORE
+        ]
+
         # ----------------------------------------------------
         # Final deterministic ordering.
         # ----------------------------------------------------
@@ -772,8 +818,35 @@ Do not return additional fields.
     def _fallback_results(
         results: list[RetrievalResult],
         top_k: int,
+        query: str,
     ) -> list[RerankResult]:
         """Return grounded candidates ranked by hybrid score when Gemini is down."""
+
+        stop_words = {
+            "i", "im", "am", "a", "an", "the", "and", "or", "but",
+            "to", "of", "in", "on", "at", "for", "with", "from", "by",
+            "as", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "which", "what",
+            "who", "that", "this", "these", "those", "looking", "want",
+            "need", "seeking", "candidate", "candidates", "skills", "skill",
+            "experience", "year", "years",
+        }
+        query_terms = set(re.findall(r"[a-z]+", query.casefold())) - stop_words
+        if "accountant" in query_terms:
+            query_terms.update({"accounting", "accountancy"})
+        if "accounting" in query_terms:
+            query_terms.update({"accountant", "accountancy"})
+        if "genai" in query_terms:
+            query_terms.update({"generative", "ai"})
+        if "quick" in query_terms or "books" in query_terms:
+            query_terms.update({"quickbooks", "quick", "books"})
+        if "ms" in query_terms and "excel" in query_terms:
+            query_terms.add("microsoft")
+        experience_match = re.search(
+            r"\b(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b",
+            query.casefold(),
+        )
+        required_years = int(experience_match.group(1)) if experience_match else None
 
         grouped: dict[str, dict[str, Any]] = {}
         for result in results:
@@ -782,6 +855,10 @@ Do not return additional fields.
                 continue
 
             candidate_id = str(candidate_id)
+            evidence = result.text.strip()
+            evidence_terms = set(re.findall(r"[a-z]+", evidence.casefold()))
+            if not query_terms or not query_terms.intersection(evidence_terms):
+                continue
             score = result.normalized_score
             if score is None:
                 score = result.raw_score
@@ -796,11 +873,39 @@ Do not return additional fields.
                 },
             )
             item["score"] = max(item["score"], score)
-            evidence = result.text.strip()
             if evidence and evidence not in item["evidence"]:
                 item["evidence"].append(evidence[:600])
             if result.chunk_id not in item["chunk_ids"]:
                 item["chunk_ids"].append(result.chunk_id)
+
+        if required_years is not None:
+            current_year = datetime.now().year
+            for candidate_id, item in list(grouped.items()):
+                text = " ".join(item["evidence"]).casefold()
+                stated_years = [
+                    int(value)
+                    for value in re.findall(r"\b(\d{1,2})\s*\+?\s*years?\b", text)
+                ]
+                dated_years = [
+                    current_year - int(year)
+                    for year in re.findall(
+                        r"\b(?:summer|spring|fall|winter)\s+((?:19|20)\d{2})\b",
+                        text,
+                    )
+                ]
+                dated_years.extend(
+                    max(
+                        0,
+                        int(end if end.isdigit() else current_year) - int(start),
+                    )
+                    for start, end in re.findall(
+                        r"\b((?:19|20)\d{2})\s*(?:-|–|to)\s*(present|current|(?:19|20)\d{2})\b",
+                        text,
+                    )
+                )
+                known_years = stated_years + dated_years
+                if known_years and max(known_years) < required_years:
+                    del grouped[candidate_id]
 
         ranked = sorted(
             grouped.items(),
@@ -812,12 +917,13 @@ Do not return additional fields.
                 candidate_id=candidate_id,
                 candidate_name=item["candidate_name"],
                 match_score=item["score"],
-                explanation="Ranked by combined semantic and keyword retrieval; candidate details below are from resume evidence.",
+                explanation=None,
                 evidence=item["evidence"][:3],
                 source_chunk_ids=item["chunk_ids"],
                 rank=rank,
             )
             for rank, (candidate_id, item) in enumerate(ranked, start=1)
+            if item["score"] >= GeminiReranker.MIN_FALLBACK_SCORE
         ]
 
     # ========================================================
@@ -898,10 +1004,10 @@ Do not return additional fields.
             Structured RerankResult list.
         """
 
-        self._validate_inputs(
-            query=query,
-            results=results,
-        )
+        if not query or not query.strip():
+            raise ValueError("Reranker query cannot be empty.")
+        if not results:
+            return RerankResults()
 
         selected_results = (
             self._select_top_results(
@@ -948,6 +1054,10 @@ Do not return additional fields.
                     )
                 )
 
+                if not reranked:
+                    logger.info("Gemini reranker found no relevant candidates | query=%s", query)
+                    return RerankResults()
+
                 elapsed_ms = (
                     time.perf_counter()
                     - start_time
@@ -967,7 +1077,7 @@ Do not return additional fields.
                     reranked,
                 )
 
-                return reranked
+                return RerankResults(reranked)
 
             except (
                 ValueError,
@@ -1000,13 +1110,32 @@ Do not return additional fields.
         fallback = self._fallback_results(
             selected_results,
             top_k=top_k or settings.RERANK_TOP_K,
+            query=query,
         )
         logger.warning(
             "Using retrieval-score candidate ordering after Gemini reranking failure | candidates=%d last_error=%s",
             len(fallback),
             last_error,
         )
-        return fallback
+        error_text = str(last_error or "").upper()
+        if "RESOURCE_EXHAUSTED" in error_text or "QUOTA" in error_text:
+            notice = (
+                "Gemini API quota is exhausted (HTTP 429). I can still show "
+                "keyword-matched resumes, but AI fit scoring and recommendations "
+                "are unavailable until the quota resets."
+            )
+        elif re.search(r"\b429\b", error_text):
+            notice = (
+                "Gemini API rate limit reached. I can still show keyword-matched "
+                "resumes, but AI fit scoring and recommendations are temporarily unavailable."
+            )
+        else:
+            notice = (
+                "Gemini is temporarily unavailable or returned an unusable response. "
+                "Any results shown are "
+                "keyword matches without AI scoring or recommendations."
+            )
+        return RerankResults(fallback, service_notice=notice)
 
     # ========================================================
     # CONVENIENCE METHOD

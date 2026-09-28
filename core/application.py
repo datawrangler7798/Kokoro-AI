@@ -257,13 +257,16 @@ class KokoroApplication:
         return text.strip()
 
     @staticmethod
-    def _evidence_based_answer(reranked: list[Any]) -> str:
+    def _evidence_based_answer(
+        reranked: list[Any],
+        service_notice: str | None = None,
+    ) -> str:
         """Format retrieved candidates into a useful answer without an LLM call."""
 
         if not reranked:
             return "I found resume matches, but couldn’t summarize them right now. Please try again shortly."
 
-        lines = ["Here are the closest candidates found in the resume library:"]
+        lines = [service_notice or "Here are the closest candidates found in the resume library:"]
         for index, candidate in enumerate(reranked[:5], start=1):
             name = candidate.candidate_name or candidate.candidate_id
             lines.append(f"\n{index}. **{name}** (Candidate ID: {candidate.candidate_id})")
@@ -271,6 +274,15 @@ class KokoroApplication:
                 lines.append(candidate.explanation)
             for evidence in candidate.evidence[:2]:
                 lines.append(f"- {evidence}")
+        if (
+            not service_notice
+            and reranked
+            and all(not candidate.explanation for candidate in reranked)
+        ):
+            lines[0] = (
+                "Gemini’s fit review is unavailable right now. Here are the "
+                "closest keyword matches, with supporting resume evidence:"
+            )
         return "\n".join(lines)
 
     def answer(self, query: str, session_id: str) -> KokoroResponse:
@@ -290,7 +302,7 @@ class KokoroApplication:
             context={},
             session_id=session_id,
             model_version=self.settings.LLM_MODEL,
-            prompt_version="kokoro-v1",
+            prompt_version="kokoro-v5",
         )
         cached = self.memory.get_cache(cache_key)
         if cached is not None:
@@ -355,6 +367,10 @@ class KokoroApplication:
                 logger.exception("Could not inspect Pinecone after an empty search result.")
 
         reranked = self.reranker.rerank(query, retrieved) if retrieved else []
+        reranker_notice = getattr(reranked, "service_notice", None)
+        used_fallback = bool(reranked) and all(
+            not item.explanation for item in reranked
+        )
         prompt_context = PromptContext(
             query=query,
             retrieved_results=retrieved,
@@ -370,7 +386,18 @@ class KokoroApplication:
                 if memory_text else None
             ),
         )
-        if retrieved:
+        if not reranked:
+            if reranker_notice:
+                answer = (
+                    f"{reranker_notice}\n\n"
+                    "No keyword-supported candidates were found to review. "
+                    "You can retry after the quota resets."
+                )
+            else:
+                answer = "No matching candidates found. Try adjusting the role, skills, or experience requirements."
+        elif used_fallback:
+            answer = self._evidence_based_answer(reranked, reranker_notice)
+        elif retrieved:
             try:
                 answer = self._generate(
                     prompts["system_prompt"],
@@ -392,9 +419,14 @@ class KokoroApplication:
             CandidateResult(
                 candidate_id=item.candidate_id,
                 candidate_name=item.candidate_name,
-                match_score=item.match_score,
+                profile_summary=item.profile_summary,
+                match_score=item.match_score if item.explanation else None,
+                score_breakdown=item.score_breakdown if item.explanation else None,
                 matched_skills=item.matched_skills,
                 missing_skills=item.missing_skills,
+                advantages=item.advantages,
+                gaps=item.gaps,
+                recommendation=item.recommendation,
                 experience_match=item.experience_match,
                 explanation=item.explanation,
                 evidence=item.evidence,
@@ -425,6 +457,7 @@ class KokoroApplication:
             latency_ms=(time.perf_counter() - started) * 1000,
             metadata={
                 "retrieved_contexts": [item.text for item in retrieved],
+                "reranker_notice": reranker_notice,
             },
         )
         response.cache_status = CacheStatus.MISS

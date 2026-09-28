@@ -445,20 +445,6 @@ def render_sidebar() -> None:
     if is_ended:
         st.sidebar.info("This chat has ended. Start a new chat to continue.")
 
-    if chat_started:
-        with st.sidebar.expander("Active session debug"):
-            st.caption("Only the active session is shown here.")
-            st.code(st.session_state.session_id, language=None)
-            st.write(
-                {
-                    "status": "ended" if is_ended else "active",
-                    "messages": len(st.session_state.messages),
-                    "job description": "attached" if st.session_state.job_description else "not attached",
-                    "search pending": st.session_state.pending_search is not None,
-                }
-            )
-
-
 # ============================================================
 # Chat History
 # ============================================================
@@ -621,19 +607,49 @@ def render_response_metadata(
 
 
 def render_candidate_cards(candidates: list[Any]) -> None:
+    has_fit_assessment = any(candidate.get("score_breakdown") for candidate in candidates)
+    if candidates and any(candidate.get("score_breakdown") for candidate in candidates):
+        with st.expander("How the JD fit score is calculated"):
+            st.caption("Evidence-based fit guidance, not a probability of hiring.")
+            st.write("Role relevance 30% · Skills match 35% · Experience 20% · Domain relevance 10% · Evidence strength 5%.")
+    elif candidates and not has_fit_assessment:
+        st.caption("These are keyword-supported resume matches; Gemini fit scoring is temporarily unavailable.")
+
     for candidate in candidates:
         with st.container(border=True):
             st.subheader(candidate.get("candidate_name") or candidate.get("candidate_id", "Candidate"))
+            if candidate.get("profile_summary"):
+                st.write(candidate["profile_summary"])
             score = candidate.get("match_score")
             if score is not None:
-                st.metric("Match score", f"{score:.0%}")
-            left, right = st.columns(2)
-            with left:
-                st.markdown("**Matching skills**")
-                st.write(", ".join(candidate.get("matched_skills", [])) or "Not specified")
-            with right:
-                st.markdown("**Potential gaps**")
-                st.write(", ".join(candidate.get("missing_skills", [])) or "Not specified")
+                st.metric("JD fit score", f"{score:.0%}")
+            recommendation = candidate.get("recommendation")
+            if recommendation:
+                st.markdown(f"**Recruiter suggestion:** {recommendation}")
+
+            score_breakdown = candidate.get("score_breakdown") or {}
+            if score_breakdown:
+                with st.expander("Fit breakdown"):
+                    labels = {
+                        "role_relevance": "Role relevance",
+                        "skills_match": "Skills match",
+                        "experience_match": "Experience match",
+                        "domain_relevance": "Domain relevance",
+                        "evidence_strength": "Evidence strength",
+                    }
+                    for key, label in labels.items():
+                        value = score_breakdown.get(key)
+                        if value is not None:
+                            st.progress(value / 100, text=f"{label}: {value:.0f}%")
+
+            if has_fit_assessment:
+                left, right = st.columns(2)
+                with left:
+                    st.markdown("**Advantages**")
+                    st.write("\n".join(f"- {item}" for item in candidate.get("advantages", [])) or ", ".join(candidate.get("matched_skills", [])) or "No clear strengths found in the retrieved evidence.")
+                with right:
+                    st.markdown("**Gaps to clarify**")
+                    st.write("\n".join(f"- {item}" for item in candidate.get("gaps", [])) or ", ".join(candidate.get("missing_skills", [])) or "No major gaps identified in the retrieved evidence.")
             if candidate.get("explanation"):
                 st.write(candidate["explanation"])
             evidence = candidate.get("evidence", [])

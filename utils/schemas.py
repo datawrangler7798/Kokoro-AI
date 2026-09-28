@@ -825,6 +825,16 @@ class RetrievalResponse(KokoroBaseModel):
 # ============================================================
 
 
+class CandidateFitScores(KokoroBaseModel):
+    """Evidence-based dimensions used to calculate a JD fit score."""
+
+    role_relevance: float = Field(..., ge=0, le=100)
+    skills_match: float = Field(..., ge=0, le=100)
+    experience_match: float = Field(..., ge=0, le=100)
+    domain_relevance: float = Field(..., ge=0, le=100)
+    evidence_strength: float = Field(..., ge=0, le=100)
+
+
 class RerankResult(KokoroBaseModel):
     """
     Structured result returned by the Gemini reranker.
@@ -844,12 +854,16 @@ class RerankResult(KokoroBaseModel):
 
     candidate_name: str | None = None
 
+    profile_summary: str | None = None
+
     match_score: float = Field(
         ...,
         ge=0,
         le=1,
         description="Normalized relevance score from 0 to 1.",
     )
+
+    score_breakdown: CandidateFitScores | None = None
 
     matched_skills: list[str] = Field(
         default_factory=list,
@@ -859,12 +873,15 @@ class RerankResult(KokoroBaseModel):
         default_factory=list,
     )
 
+    advantages: list[str] = Field(default_factory=list)
+
+    gaps: list[str] = Field(default_factory=list)
+
+    recommendation: str | None = None
+
     experience_match: str | None = None
 
-    explanation: str = Field(
-        ...,
-        min_length=1,
-    )
+    explanation: str | None = None
 
     evidence: list[str] = Field(
         default_factory=list,
@@ -883,6 +900,8 @@ class RerankResult(KokoroBaseModel):
     @field_validator(
         "matched_skills",
         "missing_skills",
+        "advantages",
+        "gaps",
         "evidence",
         "source_chunk_ids",
     )
@@ -922,11 +941,15 @@ class CandidateResult(KokoroBaseModel):
 
     candidate_name: str | None = None
 
+    profile_summary: str | None = None
+
     match_score: float | None = Field(
         default=None,
         ge=0,
         le=1,
     )
+
+    score_breakdown: CandidateFitScores | None = None
 
     matched_skills: list[str] = Field(
         default_factory=list,
@@ -935,6 +958,12 @@ class CandidateResult(KokoroBaseModel):
     missing_skills: list[str] = Field(
         default_factory=list,
     )
+
+    advantages: list[str] = Field(default_factory=list)
+
+    gaps: list[str] = Field(default_factory=list)
+
+    recommendation: str | None = None
 
     experience_match: str | None = None
 
