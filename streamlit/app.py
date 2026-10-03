@@ -46,6 +46,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import json
 import re
 import threading
+import time
 from html import escape
 from typing import Any
 
@@ -298,7 +299,9 @@ def _index_existing_resumes(application: Any) -> None:
         if not resume_dir.exists():
             return {}
         files: dict[Path, tuple[int, int]] = {}
-        for path in resume_dir.glob("*.pdf"):
+        for path in resume_dir.iterdir():
+            if not path.is_file() or path.suffix.lower() != ".pdf":
+                continue
             try:
                 stat = path.stat()
                 files[path] = (stat.st_mtime_ns, stat.st_size)
@@ -322,6 +325,7 @@ def _index_existing_resumes(application: Any) -> None:
         )
         for item in result.get("results", []):
             if item.get("error"):
+                known_files.pop(resume_dir / item.get("source_file", ""), None)
                 logger.error(
                     "Document indexing failed | file=%s | error_type=%s | error=%s",
                     item.get("source_file", "unknown"),
@@ -333,28 +337,54 @@ def _index_existing_resumes(application: Any) -> None:
         known_files = {}
 
     pending_files: dict[Path, tuple[int, int]] = {}
-    threading.Event().wait(2)
+    retry_state: dict[Path, tuple[tuple[int, int], float, int]] = {}
+    stop_event = threading.Event()
+    stop_event.wait(2)
     logger.info("Resume folder watcher started | directory=%s", resume_dir)
-    while True:
+    while not stop_event.is_set():
         try:
             current_files = snapshot()
             for path, signature in current_files.items():
                 if known_files.get(path) == signature:
                     pending_files.pop(path, None)
+                    retry_state.pop(path, None)
                     continue
 
                 # Wait for the file size and modification time to settle so a
                 # partially copied PDF is not sent to the parser.
                 if pending_files.get(path) != signature:
                     pending_files[path] = signature
+                    if retry_state.get(path, (None, 0, 0))[0] != signature:
+                        retry_state.pop(path, None)
+                    continue
+
+                retry = retry_state.get(path)
+                if retry and retry[0] == signature and time.monotonic() < retry[1]:
                     continue
 
                 logger.info("New or changed resume detected | file=%s", path.name)
-                result = application.ingest_files([path], DocumentType.RESUME)
+                try:
+                    result = application.ingest_files([path], DocumentType.RESUME)
+                except Exception:
+                    logger.exception("Resume ingestion raised an error | file=%s", path.name)
+                    result = {"failed_files": 1}
+
                 if result.get("failed_files", 0):
-                    logger.error("Resume ingestion failed | file=%s", path.name)
+                    attempts = retry[2] + 1 if retry and retry[0] == signature else 1
+                    retry_delay = min(300, 15 * (2 ** min(attempts - 1, 5)))
+                    retry_state[path] = (
+                        signature,
+                        time.monotonic() + retry_delay,
+                        attempts,
+                    )
+                    logger.error(
+                        "Resume ingestion failed; retrying in %d seconds | file=%s",
+                        retry_delay,
+                        path.name,
+                    )
                 else:
                     known_files[path] = signature
+                    retry_state.pop(path, None)
                     logger.info(
                         "Resume ingestion finished | file=%s indexed=%d skipped=%d chunks=%d",
                         path.name,
@@ -364,13 +394,15 @@ def _index_existing_resumes(application: Any) -> None:
                     )
                 pending_files.pop(path, None)
 
-            for path in known_files.keys() - current_files.keys():
+            tracked_paths = known_files.keys() | pending_files.keys() | retry_state.keys()
+            for path in tracked_paths - current_files.keys():
                 known_files.pop(path, None)
                 pending_files.pop(path, None)
+                retry_state.pop(path, None)
         except Exception:
             logger.exception("Resume folder watcher iteration failed.")
 
-        threading.Event().wait(2)
+        stop_event.wait(2)
 
 
 @st.cache_resource
@@ -1077,12 +1109,6 @@ def main() -> None:
             )
         render_evaluation_tab()
     else:
-        with st.container(border=True):
-            st.markdown("### Your recruiting workspace")
-            st.write(
-                "Search your resume library in plain language and review "
-                "evidence-backed candidate matches in chat."
-            )
         render_chat_history()
         if st.session_state.session_id in st.session_state.ended_sessions:
             st.info("This chat has ended. Choose **New chat** to start another session.")
