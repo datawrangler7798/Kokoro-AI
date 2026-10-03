@@ -287,33 +287,31 @@ def get_evaluator():
 # ============================================================
 
 
-@st.cache_resource
-def initialize_resume_index() -> dict[str, Any]:
+def _index_existing_resumes(application: Any) -> None:
     """
-    Discover and index existing PDF resumes from
-    data/resumes/.
-
-    The ingestion service handles:
-
-        PDF
-          ↓
-        validation
-          ↓
-        parsing
-          ↓
-        chunking
-          ↓
-        Gemini embedding
-          ↓
-        Pinecone upsert
-
-    This runs once per Streamlit process, so local resumes are
-    ingested at startup rather than from a UI control.
+    Index existing and newly added resumes in a background worker.
     """
+
+    resume_dir = Path(application.settings.RESUME_DIRECTORY)
+
+    def snapshot() -> dict[Path, tuple[int, int]]:
+        if not resume_dir.exists():
+            return {}
+        files: dict[Path, tuple[int, int]] = {}
+        for path in resume_dir.glob("*.pdf"):
+            try:
+                stat = path.stat()
+                files[path] = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                logger.debug("Could not inspect resume while scanning: %s", path)
+        return files
 
     try:
+        # Keep a pre-ingestion snapshot so files copied in during startup are
+        # picked up by the watcher after the initial batch completes.
+        known_files = snapshot()
         logger.info("Starting startup indexing from data/resumes and data/jds.")
-        result = get_application().ingest_existing_resumes()
+        result = application.ingest_existing_resumes()
         logger.info(
             "Startup document indexing completed | total=%d indexed=%d skipped=%d failed=%d chunks=%d",
             result.get("total_files", 0),
@@ -330,23 +328,63 @@ def initialize_resume_index() -> dict[str, Any]:
                     item.get("error_type", "IndexingError"),
                     item["error"],
                 )
-
-        return result
-
-    except Exception as exc:
+    except Exception:
         logger.exception("Startup document indexing failed.")
+        known_files = {}
 
-        result = {
-            "total_files": 0,
-            "processed_files": 0,
-            "successful_files": 0,
-            "skipped_files": 0,
-            "failed_files": 0,
-            "total_chunks": 0,
-            "results": [],
-            "error": str(exc),
-        }
-        return result
+    pending_files: dict[Path, tuple[int, int]] = {}
+    threading.Event().wait(2)
+    logger.info("Resume folder watcher started | directory=%s", resume_dir)
+    while True:
+        try:
+            current_files = snapshot()
+            for path, signature in current_files.items():
+                if known_files.get(path) == signature:
+                    pending_files.pop(path, None)
+                    continue
+
+                # Wait for the file size and modification time to settle so a
+                # partially copied PDF is not sent to the parser.
+                if pending_files.get(path) != signature:
+                    pending_files[path] = signature
+                    continue
+
+                logger.info("New or changed resume detected | file=%s", path.name)
+                result = application.ingest_files([path], DocumentType.RESUME)
+                if result.get("failed_files", 0):
+                    logger.error("Resume ingestion failed | file=%s", path.name)
+                else:
+                    known_files[path] = signature
+                    logger.info(
+                        "Resume ingestion finished | file=%s indexed=%d skipped=%d chunks=%d",
+                        path.name,
+                        result.get("successful_files", 0),
+                        result.get("skipped_files", 0),
+                        result.get("total_chunks", 0),
+                    )
+                pending_files.pop(path, None)
+
+            for path in known_files.keys() - current_files.keys():
+                known_files.pop(path, None)
+                pending_files.pop(path, None)
+        except Exception:
+            logger.exception("Resume folder watcher iteration failed.")
+
+        threading.Event().wait(2)
+
+
+@st.cache_resource
+def initialize_resume_index() -> threading.Thread:
+    """Start resume indexing once per process without blocking or updating the UI."""
+
+    worker = threading.Thread(
+        target=_index_existing_resumes,
+        args=(get_application(),),
+        name="kokoro-resume-indexer",
+        daemon=True,
+    )
+    worker.start()
+    return worker
 
 
 # ============================================================
@@ -395,13 +433,25 @@ def start_new_session() -> None:
     st.rerun()
 
 
-def render_sidebar() -> None:
+def render_sidebar() -> str:
     """
     Render sidebar controls.
     """
 
-    st.sidebar.markdown("## HIRE AI")
+    st.sidebar.markdown("## Kokoro AI")
     st.sidebar.caption("Recruiter workspace")
+    page = st.sidebar.radio(
+        "Workspace",
+        ["Recruiter chat", "Evaluation"],
+        label_visibility="collapsed",
+        key="workspace_page",
+    )
+    st.sidebar.divider()
+
+    if page == "Evaluation":
+        st.sidebar.caption("Measure retrieval and answer quality.")
+        return page
+
     st.sidebar.markdown("#### Current session")
     chat_started = any(
         message.get("role") == "user"
@@ -447,6 +497,8 @@ def render_sidebar() -> None:
 
     if is_ended:
         st.sidebar.info("This chat has ended. Start a new chat to continue.")
+
+    return page
 
 # ============================================================
 # Chat History
@@ -645,10 +697,12 @@ def render_candidate_cards(candidates: list[Any]) -> None:
                         "domain_relevance": "Domain relevance",
                         "evidence_strength": "Evidence strength",
                     }
-                    for key, label in labels.items():
-                        value = score_breakdown.get(key)
-                        if value is not None:
-                            st.progress(value / 100, text=f"{label}: {value:.0f}%")
+                    breakdown_rows = [
+                        {"Dimension": label, "Score": f"{score_breakdown[key]:.0f}%"}
+                        for key, label in labels.items()
+                        if score_breakdown.get(key) is not None
+                    ]
+                    st.dataframe(breakdown_rows, hide_index=True, width="stretch")
 
             if has_fit_assessment:
                 left, right = st.columns(2)
@@ -753,7 +807,6 @@ def process_pending_search() -> None:
 
     st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
     st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
-    st.rerun()
 
 
 def render_chat_input() -> None:
@@ -846,10 +899,10 @@ def render_evaluation_tab() -> None:
             help="Use candidate IDs from your resume metadata. Without ground-truth IDs, the app can show the ranking but cannot calculate precision or recall.",
         )
         run_ragas = st.checkbox(
-            "Also score the generated answer with RAGAS (slower; uses Google Gemini)",
-            value=False,
+            "Score the generated answer with RAGAS (uses Google Gemini)",
+            value=settings.ENABLE_RAGAS,
             disabled=not settings.ENABLE_RAGAS,
-            help="Enable ENABLE_RAGAS in configuration to use this option.",
+            help="RAGAS scores faithfulness; adding a reference answer also enables context precision and recall.",
         )
         submitted = st.form_submit_button("Run evaluation")
     if not submitted:
@@ -944,41 +997,42 @@ def render_styles() -> None:
     st.markdown(
         """
         <style>
-        :root { --brand: #2563eb; --ink: #14243a; --muted: #64748b; --line: #e2e8f0; }
-        .stApp { background: linear-gradient(180deg, #e9eef5 0%, #e5ebf3 44%, #edf1f7 100%); color: var(--ink); }
-        [data-testid="stHeader"] { background: transparent; }
-        [data-testid="stSidebar"] { background: rgba(222,230,240,.97); border-right: 1px solid #cbd5e1; }
-        [data-testid="stSidebar"] > div { padding-top: 1.3rem; }
-        .block-container { max-width: 1240px; padding: 1.6rem 2rem 4rem; }
-        .kokoro-hero { display:flex; align-items:center; gap:14px; padding:5px 0 20px; border-bottom:1px solid var(--line); margin-bottom:24px; }
-        .kokoro-title { color:var(--brand); font-size:27px; font-weight:800; letter-spacing:.02em; line-height:1.2; }
-        .kokoro-subtitle { color:var(--muted); font-size:14px; margin-top:4px; }
-        .jd-prompt { display:flex; gap:14px; align-items:center; margin:12px 0 20px; padding:18px 20px; border:1px solid #cbd8e8; border-radius:18px; background:linear-gradient(115deg,#f8fafc 0%,#e8f0fa 100%); color:#243b53; box-shadow:0 8px 24px #1e3a5f12; }
-        .jd-prompt-icon { display:grid; place-items:center; flex:0 0 40px; height:40px; border-radius:13px; color:#1d4ed8; background:#e6f0ff; font-size:20px; }
-        .jd-prompt span { color:#64748b; font-size:13px; }
-        [data-testid="stChatMessage"] { border:1px solid var(--line); border-radius:18px; padding:15px 18px; background:rgba(255,255,255,.96); box-shadow:0 5px 18px #18334d0a; }
-        [data-testid="stChatMessageAvatarUser"] { background:#3b82f6 !important; color:#fff !important; }
-        [data-testid="stChatInput"] { border-radius:16px; }
-        [data-testid="stTabs"] [role="tablist"] { gap:8px; border-bottom:1px solid var(--line); }
-        [data-testid="stTabs"] button { font-weight:650; }
-        [data-testid="stTabs"] button[aria-selected="true"] { color:var(--brand); border-bottom-color:var(--brand); }
-        [data-testid="stSidebar"] button, .stButton button, [data-testid="stFormSubmitButton"] button { border-radius:11px; }
-        .stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] { box-shadow:0 5px 14px #2563eb24; }
-        div[data-testid="stMetric"] { background:#fff; border:1px solid var(--line); padding:13px 15px; border-radius:14px; box-shadow:0 4px 14px #18334d08; }
-        [data-testid="stVerticalBlockBorderWrapper"] { border-radius:16px; border-color:var(--line); background:rgba(255,255,255,.78); }
-        [data-testid="stExpander"] { border-color:var(--line); border-radius:13px; background:rgba(255,255,255,.72); }
-        input, textarea, [data-baseweb="select"] > div { border-radius:11px !important; }
+        :root { --brand:#5556d8; --ink:#1b2433; --muted:#687386; --line:#e4e7ef; --surface:#fff; }
+        .stApp { background:#f6f7fb; color:var(--ink); }
+        [data-testid="stHeader"] { background:transparent; }
+        [data-testid="stSidebar"] { background:#eef0f7; border-right:1px solid #e0e4ed; }
+        [data-testid="stSidebar"] > div { padding-top:1.35rem; }
+        [data-testid="stSidebar"] h2 { letter-spacing:-.035em; }
+        [data-testid="stSidebar"] [role="radiogroup"] { gap:.4rem; }
+        [data-testid="stSidebar"] [role="radiogroup"] label { padding:.45rem .6rem; border-radius:10px; }
+        .block-container { max-width:1120px; padding:1.7rem 2rem 4rem; }
+        .kokoro-hero { display:flex; align-items:center; gap:14px; padding:4px 0 19px; border-bottom:1px solid var(--line); margin-bottom:23px; }
+        .kokoro-title { color:var(--ink); font-size:28px; font-weight:760; letter-spacing:-.045em; line-height:1.2; }
+        .kokoro-subtitle { color:var(--muted); font-size:14px; margin-top:5px; }
+        .jd-prompt { display:flex; gap:14px; align-items:center; margin:12px 0 20px; padding:17px 19px; border:1px solid #dfe2f5; border-radius:15px; background:#fff; color:var(--ink); box-shadow:0 8px 24px #20234a08; }
+        .jd-prompt-icon { display:grid; place-items:center; flex:0 0 40px; height:40px; border-radius:12px; color:var(--brand); background:#eeefff; font-size:20px; }
+        .jd-prompt span { color:var(--muted); font-size:13px; }
+        [data-testid="stChatMessage"] { border:1px solid var(--line); border-radius:16px; padding:14px 17px; background:var(--surface); box-shadow:0 3px 12px #20234a06; }
+        [data-testid="stChatMessageAvatarUser"] { background:var(--brand) !important; color:#fff !important; }
+        [data-testid="stChatInput"] { border-radius:14px; box-shadow:0 4px 18px #20234a0a; }
+        [data-testid="stSidebar"] button, .stButton button, [data-testid="stFormSubmitButton"] button { border-radius:10px; font-weight:600; }
+        .stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] { box-shadow:0 4px 12px #5556d826; }
+        div[data-testid="stMetric"] { background:var(--surface); border:1px solid var(--line); padding:12px 14px; border-radius:13px; box-shadow:0 3px 12px #20234a06; }
+        [data-testid="stVerticalBlockBorderWrapper"] { border-radius:15px; border-color:var(--line); background:var(--surface); }
+        [data-testid="stExpander"] { border-color:var(--line); border-radius:12px; background:var(--surface); }
+        input, textarea, [data-baseweb="select"] > div { border-radius:10px !important; }
+        input:focus, textarea:focus { border-color:var(--brand) !important; box-shadow:0 0 0 2px #5556d820 !important; }
+        hr { border-color:var(--line); }
         @media (max-width: 768px) {
           .block-container { padding:1rem 1rem 2.5rem; }
-          .kokoro-hero { gap:12px; margin-bottom:18px; padding-bottom:17px; }
-          .kokoro-title { font-size:22px; }
+          .kokoro-hero { gap:12px; margin-bottom:18px; padding-bottom:16px; }
+          .kokoro-title { font-size:23px; }
           .kokoro-subtitle { font-size:13px; }
           .jd-prompt { align-items:flex-start; padding:15px; border-radius:15px; }
           [data-testid="stChatMessage"] { padding:12px; border-radius:15px; }
           [data-testid="stHorizontalBlock"] { flex-wrap:wrap; gap:.65rem; }
           [data-testid="stHorizontalBlock"] > [data-testid="column"] { min-width:min(100%, 240px); }
           div[data-testid="stMetric"] { padding:10px 12px; }
-          [data-testid="stTabs"] [role="tablist"] { gap:2px; }
         }
         @media (max-width: 480px) {
           .block-container { padding:.75rem .75rem 2rem; }
@@ -986,7 +1040,6 @@ def render_styles() -> None:
           .kokoro-subtitle { font-size:12px; }
           .jd-prompt { gap:10px; padding:13px; }
           [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] { overflow-wrap:anywhere; }
-          [data-testid="stTabs"] button { font-size:13px; }
         }
         </style>
         """,
@@ -1008,22 +1061,28 @@ def main() -> None:
 
     render_styles()
     render_header()
-    render_sidebar()
-
-    with st.container(border=True):
-        st.markdown("### Your recruiting workspace")
-        st.write(
-            "Search your resume library in plain language, review evidence-backed "
-            "candidate matches in chat, or use Evaluation to check search quality."
-        )
+    page = render_sidebar()
 
     # --------------------------------------------------------
     # Initialize existing resumes
     # --------------------------------------------------------
 
     initialize_resume_index()
-    chat_tab, evaluation_tab = st.tabs(["Recruiter chat", "Evaluation"])
-    with chat_tab:
+    if page == "Evaluation":
+        with st.container(border=True):
+            st.markdown("### Evaluation workspace")
+            st.write(
+                "Measure hybrid retrieval against known relevant candidates, and "
+                "optionally score generated answers with RAGAS."
+            )
+        render_evaluation_tab()
+    else:
+        with st.container(border=True):
+            st.markdown("### Your recruiting workspace")
+            st.write(
+                "Search your resume library in plain language and review "
+                "evidence-backed candidate matches in chat."
+            )
         render_chat_history()
         if st.session_state.session_id in st.session_state.ended_sessions:
             st.info("This chat has ended. Choose **New chat** to start another session.")
@@ -1031,8 +1090,9 @@ def main() -> None:
             render_job_description_status()
             process_pending_search()
             render_chat_input()
-    with evaluation_tab:
-        render_evaluation_tab()
+
+    st.divider()
+    st.caption("Designed and developed by Rupesh Kumar")
 
 
 if __name__ == "__main__":

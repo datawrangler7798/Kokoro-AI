@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # APPLICATION
     # ============================================================
 
-    APP_NAME: str = "HIRE AI"
+    APP_NAME: str = "Kokoro AI"
     APP_ENV: str = "development"
     LOG_LEVEL: str = "INFO"
 
