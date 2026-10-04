@@ -16,12 +16,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from core.retrieval.hybrid_indexer import (
-    BM25Backend,
-    BM25Record,
-    HybridIndexer,
-)
-
+from core.retrieval.hybrid_indexer import BM25Backend, BM25Record, HybridIndexer
 
 # ============================================================
 # Test Semantic Retriever
@@ -44,7 +39,7 @@ class MockSemanticRetriever:
     def __init__(self, results):
         self.results = results
 
-    def search(
+    def similarity_search(
         self,
         query: str,
         top_k: int = 10,
@@ -66,30 +61,21 @@ def bm25_backend():
         [
             BM25Record(
                 chunk_id="chunk-1",
-                content=(
-                    "Python data scientist "
-                    "with machine learning experience"
-                ),
+                text=("Python data scientist " "with machine learning experience"),
                 metadata={
                     "candidate_id": "candidate-1",
                 },
             ),
             BM25Record(
                 chunk_id="chunk-2",
-                content=(
-                    "Java backend developer "
-                    "with Spring Boot experience"
-                ),
+                text=("Java backend developer " "with Spring Boot experience"),
                 metadata={
                     "candidate_id": "candidate-2",
                 },
             ),
             BM25Record(
                 chunk_id="chunk-3",
-                content=(
-                    "Python machine learning "
-                    "and generative AI engineer"
-                ),
+                text=("Python machine learning " "and generative AI engineer"),
                 metadata={
                     "candidate_id": "candidate-3",
                 },
@@ -106,9 +92,7 @@ def bm25_backend():
 
 
 def test_bm25_indexing(bm25_backend):
-    stats = bm25_backend.stats()
-
-    assert stats is not None
+    assert bm25_backend.size() == 3
 
 
 def test_bm25_search_returns_results(
@@ -131,10 +115,7 @@ def test_bm25_python_query_matches_python_documents(
         top_k=3,
     )
 
-    chunk_ids = [
-        result.chunk_id
-        for result in results
-    ]
+    chunk_ids = [record.chunk_id for record, _ in results]
 
     assert "chunk-1" in chunk_ids
     assert "chunk-3" in chunk_ids
@@ -146,15 +127,12 @@ def test_bm25_filtering(
     results = bm25_backend.search(
         "Python",
         top_k=5,
-        filters={
-            "candidate_id": "candidate-3"
-        },
+        filters={"candidate_id": "candidate-3"},
     )
 
     assert all(
-        result.metadata.get("candidate_id")
-        == "candidate-3"
-        for result in results
+        record.metadata.get("candidate_id") == "candidate-3"
+        for record, _ in results
     )
 
 
@@ -166,19 +144,14 @@ def test_bm25_filtering(
 def test_bm25_delete(
     bm25_backend,
 ):
-    bm25_backend.delete(
-        ["chunk-1"]
-    )
+    bm25_backend.delete(["chunk-1"])
 
     results = bm25_backend.search(
         "Python",
         top_k=5,
     )
 
-    chunk_ids = [
-        result.chunk_id
-        for result in results
-    ]
+    chunk_ids = [record.chunk_id for record, _ in results]
 
     assert "chunk-1" not in chunk_ids
 
@@ -197,29 +170,23 @@ def hybrid_indexer(
             chunk_id="chunk-1",
             score=0.95,
             content="Python data scientist",
-            metadata={
-                "candidate_id": "candidate-1"
-            },
+            metadata={"candidate_id": "candidate-1"},
         ),
         MockSemanticResult(
             chunk_id="chunk-3",
             score=0.85,
             content="Python GenAI engineer",
-            metadata={
-                "candidate_id": "candidate-3"
-            },
+            metadata={"candidate_id": "candidate-3"},
         ),
     ]
 
-    semantic_retriever = MockSemanticRetriever(
-        semantic_results
-    )
+    semantic_retriever = MockSemanticRetriever(semantic_results)
 
     return HybridIndexer(
         semantic_retriever=semantic_retriever,
         bm25_backend=bm25_backend,
         semantic_weight=0.6,
-        lexical_weight=0.4,
+        keyword_weight=0.4,
     )
 
 
@@ -230,12 +197,10 @@ def hybrid_indexer(
 
 def test_score_normalization():
     indexer = HybridIndexer(
-        semantic_retriever=MockSemanticRetriever(
-            []
-        ),
+        semantic_retriever=MockSemanticRetriever([]),
         bm25_backend=BM25Backend(),
         semantic_weight=0.6,
-        lexical_weight=0.4,
+        keyword_weight=0.4,
     )
 
     scores = {
@@ -244,19 +209,11 @@ def test_score_normalization():
         "c": 0.0,
     }
 
-    normalized = (
-        indexer._normalize_scores(
-            scores
-        )
-    )
+    normalized = indexer._normalize_scores(scores)
 
-    assert normalized["a"] == pytest.approx(
-        1.0
-    )
+    assert normalized["a"] == pytest.approx(1.0)
 
-    assert normalized["c"] == pytest.approx(
-        0.0
-    )
+    assert normalized["c"] == pytest.approx(0.0)
 
 
 # ============================================================
@@ -312,10 +269,7 @@ def test_hybrid_results_are_ranked(
         top_k=5,
     )
 
-    scores = [
-        result.hybrid_score
-        for result in results
-    ]
+    scores = [result.hybrid_score for result in results]
 
     assert scores == sorted(
         scores,
@@ -336,14 +290,9 @@ def test_hybrid_search_deduplicates_chunks(
         top_k=10,
     )
 
-    chunk_ids = [
-        result.chunk_id
-        for result in results
-    ]
+    chunk_ids = [result.chunk_id for result in results]
 
-    assert len(chunk_ids) == len(
-        set(chunk_ids)
-    )
+    assert len(chunk_ids) == len(set(chunk_ids))
 
 
 # ============================================================
@@ -367,13 +316,7 @@ def test_hybrid_search_respects_top_k(
 # ============================================================
 
 
-def test_empty_query_rejected(
+def test_empty_query_returns_no_results(
     hybrid_indexer,
 ):
-    with pytest.raises(
-        ValueError
-    ):
-        hybrid_indexer.search(
-            "",
-            top_k=5,
-        )
+    assert hybrid_indexer.search("", top_k=5) == []

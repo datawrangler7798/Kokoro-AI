@@ -125,16 +125,12 @@ def calculate_file_hash(
     path = Path(file_path)
 
     if not path.is_file():
-        raise FileNotFoundError(
-            f"File not found: {path}"
-        )
+        raise FileNotFoundError(f"File not found: {path}")
 
     try:
         hash_function = hashlib.new(algorithm)
     except ValueError as exc:
-        raise ValueError(
-            f"Unsupported hash algorithm: {algorithm}"
-        ) from exc
+        raise ValueError(f"Unsupported hash algorithm: {algorithm}") from exc
 
     with path.open("rb") as file:
         while True:
@@ -165,9 +161,7 @@ def get_file_size_bytes(
     path = Path(file_path)
 
     if not path.is_file():
-        raise FileNotFoundError(
-            f"File not found: {path}"
-        )
+        raise FileNotFoundError(f"File not found: {path}")
 
     return path.stat().st_size
 
@@ -207,9 +201,7 @@ def is_allowed_file_extension(
     extension = get_file_extension(file_path)
 
     normalized_extensions = {
-        value.strip().lower()
-        for value in allowed_extensions
-        if value and value.strip()
+        value.strip().lower() for value in allowed_extensions if value and value.strip()
     }
 
     return extension in normalized_extensions
@@ -229,19 +221,14 @@ def validate_file_size(
     """
 
     if max_size_mb <= 0:
-        raise ValueError(
-            "max_size_mb must be greater than 0."
-        )
+        raise ValueError("max_size_mb must be greater than 0.")
 
     size_bytes = get_file_size_bytes(file_path)
 
     max_size_bytes = max_size_mb * 1024 * 1024
 
     if size_bytes > max_size_bytes:
-        raise ValueError(
-            f"File exceeds maximum allowed size of "
-            f"{max_size_mb} MB."
-        )
+        raise ValueError(f"File exceeds maximum allowed size of " f"{max_size_mb} MB.")
 
 
 def validate_input_file(
@@ -262,18 +249,13 @@ def validate_input_file(
     path = Path(file_path)
 
     if not path.is_file():
-        raise FileNotFoundError(
-            f"Input file not found: {path}"
-        )
+        raise FileNotFoundError(f"Input file not found: {path}")
 
     if not is_allowed_file_extension(
         path,
         allowed_extensions,
     ):
-        raise ValueError(
-            f"Unsupported file extension: "
-            f"{get_file_extension(path)}"
-        )
+        raise ValueError(f"Unsupported file extension: " f"{get_file_extension(path)}")
 
     validate_file_size(
         path,
@@ -363,10 +345,7 @@ def normalize_whitespace(
     text = text.replace("\t", " ")
 
     # Remove trailing spaces from each line.
-    lines = [
-        re.sub(r"[ \t]+$", "", line)
-        for line in text.split("\n")
-    ]
+    lines = [re.sub(r"[ \t]+$", "", line) for line in text.split("\n")]
 
     # Collapse excessive blank lines while preserving
     # section readability.
@@ -511,9 +490,7 @@ def generate_document_id(
     """
 
     if not document_hash:
-        raise ValueError(
-            "document_hash cannot be empty."
-        )
+        raise ValueError("document_hash cannot be empty.")
 
     return f"doc_{document_hash[:24]}"
 
@@ -531,19 +508,12 @@ def generate_chunk_id(
     """
 
     if not document_id:
-        raise ValueError(
-            "document_id cannot be empty."
-        )
+        raise ValueError("document_id cannot be empty.")
 
     if chunk_index < 0:
-        raise ValueError(
-            "chunk_index cannot be negative."
-        )
+        raise ValueError("chunk_index cannot be negative.")
 
-    return (
-        f"{document_id}"
-        f"_chunk_{chunk_index:06d}"
-    )
+    return f"{document_id}" f"_chunk_{chunk_index:06d}"
 
 
 def generate_candidate_id(
@@ -557,9 +527,7 @@ def generate_candidate_id(
     """
 
     if not document_id:
-        raise ValueError(
-            "document_id cannot be empty."
-        )
+        raise ValueError("document_id cannot be empty.")
 
     return f"candidate_{document_id.replace('doc_', '')}"
 
@@ -593,9 +561,7 @@ def load_json(
         return default
 
     if not path.is_file():
-        raise ValueError(
-            f"Expected a file but found: {path}"
-        )
+        raise ValueError(f"Expected a file but found: {path}")
 
     try:
         with path.open(
@@ -605,9 +571,7 @@ def load_json(
             return json.load(file)
 
     except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Invalid JSON file: {path}"
-        ) from exc
+        raise ValueError(f"Invalid JSON file: {path}") from exc
 
 
 def save_json(
@@ -635,9 +599,7 @@ def save_json(
 
     ensure_parent_directory(path)
 
-    temporary_path = path.with_suffix(
-        path.suffix + ".tmp"
-    )
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
 
     try:
         with temporary_path.open(
@@ -658,9 +620,7 @@ def save_json(
         if temporary_path.exists():
             temporary_path.unlink()
 
-        raise ValueError(
-            "Data is not JSON serializable."
-        ) from exc
+        raise ValueError("Data is not JSON serializable.") from exc
 
     except Exception:
         if temporary_path.exists():
@@ -689,20 +649,14 @@ def calculate_text_hash(
     """
 
     if not isinstance(text, str):
-        raise TypeError(
-            "text must be a string."
-        )
+        raise TypeError("text must be a string.")
 
     try:
         hash_function = hashlib.new(algorithm)
     except ValueError as exc:
-        raise ValueError(
-            f"Unsupported hash algorithm: {algorithm}"
-        ) from exc
+        raise ValueError(f"Unsupported hash algorithm: {algorithm}") from exc
 
-    hash_function.update(
-        text.encode("utf-8")
-    )
+    hash_function.update(text.encode("utf-8"))
 
     return hash_function.hexdigest()
 
@@ -768,9 +722,7 @@ def sanitize_filename(
     """
 
     if not filename:
-        raise ValueError(
-            "Filename cannot be empty."
-        )
+        raise ValueError("Filename cannot be empty.")
 
     # Remove directory components.
     filename = Path(filename).name
@@ -786,9 +738,7 @@ def sanitize_filename(
     filename = filename.lstrip(".")
 
     if not filename:
-        raise ValueError(
-            "Filename became empty after sanitization."
-        )
+        raise ValueError("Filename became empty after sanitization.")
 
     return filename
 
@@ -838,18 +788,14 @@ def batch_items(
     """
 
     if batch_size <= 0:
-        raise ValueError(
-            "batch_size must be greater than 0."
-        )
+        raise ValueError("batch_size must be greater than 0.")
 
     for start in range(
         0,
         len(items),
         batch_size,
     ):
-        yield items[
-            start:start + batch_size
-        ]
+        yield items[start : start + batch_size]
 
 
 # ============================================================
@@ -883,13 +829,9 @@ def measure_time() -> Iterator[dict[str, float]]:
         yield result
 
     finally:
-        elapsed_seconds = (
-            perf_counter() - start
-        )
+        elapsed_seconds = perf_counter() - start
 
-        result["elapsed_ms"] = (
-            elapsed_seconds * 1000
-        )
+        result["elapsed_ms"] = elapsed_seconds * 1000
 
 
 def measure_function_time(
@@ -913,9 +855,7 @@ def measure_function_time(
         **kwargs,
     )
 
-    elapsed_ms = (
-        perf_counter() - start
-    ) * 1000
+    elapsed_ms = (perf_counter() - start) * 1000
 
     return result, elapsed_ms
 
@@ -946,17 +886,12 @@ def normalize_score(
     """
 
     if maximum < minimum:
-        raise ValueError(
-            "maximum cannot be smaller than minimum."
-        )
+        raise ValueError("maximum cannot be smaller than minimum.")
 
     if minimum == maximum:
         return 1.0
 
-    normalized = (
-        (score - minimum)
-        / (maximum - minimum)
-    )
+    normalized = (score - minimum) / (maximum - minimum)
 
     return max(
         0.0,
@@ -1037,17 +972,12 @@ def truncate_text(
     """
 
     if max_characters <= 0:
-        raise ValueError(
-            "max_characters must be greater than 0."
-        )
+        raise ValueError("max_characters must be greater than 0.")
 
     if len(text) <= max_characters:
         return text
 
-    return (
-        text[:max_characters]
-        + "..."
-    )
+    return text[:max_characters] + "..."
 
 
 # ============================================================
@@ -1101,9 +1031,7 @@ def parse_bool(
     }:
         return False
 
-    raise ValueError(
-        f"Invalid boolean value: {value}"
-    )
+    raise ValueError(f"Invalid boolean value: {value}")
 
 
 # ============================================================
@@ -1120,11 +1048,7 @@ def remove_none_values(
     Nested dictionaries are not recursively modified.
     """
 
-    return {
-        key: value
-        for key, value in data.items()
-        if value is not None
-    }
+    return {key: value for key, value in data.items() if value is not None}
 
 
 def merge_dicts(

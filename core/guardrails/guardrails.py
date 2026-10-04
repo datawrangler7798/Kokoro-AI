@@ -8,7 +8,6 @@ from utils.config import get_settings
 from utils.logger import get_logger
 from utils.schemas import GuardrailResult, GuardrailStatus
 
-
 logger = get_logger(__name__)
 
 
@@ -35,19 +34,13 @@ PROMPT_INJECTION_PATTERNS = [
 # ============================================================
 
 PII_PATTERNS = {
-    "email": re.compile(
-        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
-    ),
-    "phone": re.compile(
-        r"(?<!\d)(?:\+91[\s-]?)?[6-9]\d{9}(?!\d)"
-    ),
+    "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+    "phone": re.compile(r"(?<!\d)(?:\+91[\s-]?)?[6-9]\d{9}(?!\d)"),
     "pan": re.compile(
         r"\b[A-Z]{5}[0-9]{4}[A-Z]\b",
         re.IGNORECASE,
     ),
-    "aadhaar": re.compile(
-        r"(?<!\d)\d{4}[\s-]?\d{4}[\s-]?\d{4}(?!\d)"
-    ),
+    "aadhaar": re.compile(r"(?<!\d)\d{4}[\s-]?\d{4}[\s-]?\d{4}(?!\d)"),
 }
 
 
@@ -65,6 +58,7 @@ UNSUPPORTED_RECRUITING_PATTERNS = (
 # Result Model
 # ============================================================
 
+
 @dataclass
 class ValidationResult:
     valid: bool
@@ -79,6 +73,7 @@ class ValidationResult:
 # ============================================================
 # Guardrails
 # ============================================================
+
 
 class Guardrails:
     """
@@ -98,7 +93,6 @@ class Guardrails:
         detect_pii: bool | None = None,
         validate_output: bool | None = None,
     ) -> None:
-
         self.settings = get_settings()
 
         # --------------------------------------------------------
@@ -127,8 +121,7 @@ class Guardrails:
         )
 
         logger.info(
-            "Guardrails initialized | "
-            "prompt_injection=%s | pii=%s | output=%s",
+            "Guardrails initialized | " "prompt_injection=%s | pii=%s | output=%s",
             self.block_prompt_injection,
             self.detect_pii_enabled,
             self.validate_output_enabled,
@@ -200,10 +193,7 @@ class Guardrails:
 
         text = text.strip()
 
-        if any(
-            pattern.search(text)
-            for pattern in UNSUPPORTED_RECRUITING_PATTERNS
-        ):
+        if any(pattern.search(text) for pattern in UNSUPPORTED_RECRUITING_PATTERNS):
             return GuardrailResult(
                 status=GuardrailStatus.BLOCKED,
                 passed=False,
@@ -219,13 +209,10 @@ class Guardrails:
         # --------------------------------------------------------
 
         if self.block_prompt_injection:
-
             injection_matches = self.detect_prompt_injection(text)
 
             if injection_matches:
-                logger.warning(
-                    "Prompt injection detected in user input."
-                )
+                logger.warning("Prompt injection detected in user input.")
 
                 return GuardrailResult(
                     status=GuardrailStatus.BLOCKED,
@@ -238,11 +225,9 @@ class Guardrails:
         # --------------------------------------------------------
 
         if self.detect_pii_enabled:
-
             pii_matches = self.detect_pii(text)
 
             if pii_matches:
-
                 logger.warning(
                     "PII detected in user input: %s",
                     list(pii_matches.keys()),
@@ -280,7 +265,6 @@ class Guardrails:
             )
 
         for document in documents:
-
             if isinstance(document, str):
                 content = document
 
@@ -306,16 +290,10 @@ class Guardrails:
 
             # Prompt injection inside retrieved documents
             if self.block_prompt_injection:
-
-                injection_matches = self.detect_prompt_injection(
-                    content
-                )
+                injection_matches = self.detect_prompt_injection(content)
 
                 if injection_matches:
-
-                    logger.warning(
-                        "Prompt injection detected in retrieved document."
-                    )
+                    logger.warning("Prompt injection detected in retrieved document.")
 
                     return GuardrailResult(
                         status=GuardrailStatus.BLOCKED,
@@ -328,11 +306,9 @@ class Guardrails:
 
             # PII detection
             if self.detect_pii_enabled:
-
                 pii_matches = self.detect_pii(content)
 
                 if pii_matches:
-
                     logger.warning(
                         "PII detected in retrieved document: %s",
                         list(pii_matches.keys()),
@@ -370,11 +346,9 @@ class Guardrails:
         # --------------------------------------------------------
 
         if self.detect_pii_enabled:
-
             pii_matches = self.detect_pii(cleaned_output)
 
             if pii_matches:
-
                 logger.warning(
                     "PII detected in generated output: %s",
                     list(pii_matches.keys()),
@@ -400,7 +374,6 @@ class Guardrails:
         self,
         output: str,
     ) -> GuardrailResult:
-
         if not self.validate_output_enabled:
             return GuardrailResult(
                 status=GuardrailStatus.PASSED,
@@ -424,11 +397,9 @@ def create_guardrails(
     detect_pii: bool | None = None,
     validate_output: bool | None = None,
 ) -> Guardrails:
-
     global _guardrails_instance
 
     if _guardrails_instance is None:
-
         _guardrails_instance = Guardrails(
             block_prompt_injection=block_prompt_injection,
             detect_pii=detect_pii,

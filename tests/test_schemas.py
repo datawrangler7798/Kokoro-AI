@@ -23,7 +23,6 @@ from utils.schemas import (
     ValidationStatus,
 )
 
-
 # ============================================================
 # Enum Tests
 # ============================================================
@@ -42,10 +41,7 @@ def test_search_depth_enum():
 def test_query_intent_enum():
     assert QueryIntent.SEARCH.value == "search"
     assert QueryIntent.COMPARISON.value == "comparison"
-    assert (
-        QueryIntent.JD_GAP_ANALYSIS.value
-        == "jd_gap_analysis"
-    )
+    assert QueryIntent.JD_GAP_ANALYSIS.value == "jd_gap_analysis"
 
 
 def test_retrieval_method_enum():
@@ -222,12 +218,8 @@ def test_memory_item_creation():
     )
 
     assert memory.session_id == "session-001"
-    assert memory.user_query == (
-        "Find Python candidates"
-    )
-    assert memory.assistant_response == (
-        "I found 5 candidates."
-    )
+    assert memory.user_query == ("Find Python candidates")
+    assert memory.assistant_response == ("I found 5 candidates.")
 
 
 # ============================================================

@@ -30,7 +30,6 @@ from typing import Any, Iterable
 from utils.config import get_settings
 from utils.logger import logger
 
-
 # ============================================================
 # Internal Records
 # ============================================================
@@ -107,7 +106,6 @@ class MemoryRAG:
         cache_ttl_seconds: int | None = None,
         cache_enabled: bool | None = None,
     ) -> None:
-
         self.settings = get_settings()
 
         self.max_memory_items = (
@@ -123,20 +121,14 @@ class MemoryRAG:
         )
 
         self.cache_enabled = (
-            cache_enabled
-            if cache_enabled is not None
-            else self.settings.ENABLE_CACHE
+            cache_enabled if cache_enabled is not None else self.settings.ENABLE_CACHE
         )
 
         if self.max_memory_items <= 0:
-            raise ValueError(
-                "max_memory_items must be greater than zero."
-            )
+            raise ValueError("max_memory_items must be greater than zero.")
 
         if self.cache_ttl_seconds <= 0:
-            raise ValueError(
-                "cache_ttl_seconds must be greater than zero."
-            )
+            raise ValueError("cache_ttl_seconds must be greater than zero.")
 
         self._memory: dict[str, list[MemoryRecord]] = {}
 
@@ -184,11 +176,7 @@ class MemoryRAG:
         if not normalized:
             return set()
 
-        return {
-            token
-            for token in normalized.split()
-            if len(token) > 1
-        }
+        return {token for token in normalized.split() if len(token) > 1}
 
     # ========================================================
     # Memory
@@ -212,41 +200,26 @@ class MemoryRAG:
         """
 
         if not session_id:
-            raise ValueError(
-                "session_id is required."
-            )
+            raise ValueError("session_id is required.")
 
         if not user_query or not user_query.strip():
-            raise ValueError(
-                "user_query cannot be empty."
-            )
+            raise ValueError("user_query cannot be empty.")
 
         if not assistant_response or not assistant_response.strip():
-            raise ValueError(
-                "assistant_response cannot be empty."
-            )
+            raise ValueError("assistant_response cannot be empty.")
 
         record = MemoryRecord(
             session_id=session_id,
             user_query=user_query.strip(),
             assistant_response=assistant_response.strip(),
             timestamp=time.time(),
-            candidate_ids=list(
-                candidate_ids or []
-            ),
-            document_ids=list(
-                document_ids or []
-            ),
-            jd_ids=list(
-                jd_ids or []
-            ),
-            metadata=dict(
-                metadata or {}
-            ),
+            candidate_ids=list(candidate_ids or []),
+            document_ids=list(document_ids or []),
+            jd_ids=list(jd_ids or []),
+            metadata=dict(metadata or {}),
         )
 
         with self._lock:
-
             session_memory = self._memory.setdefault(
                 session_id,
                 [],
@@ -255,12 +228,7 @@ class MemoryRAG:
             session_memory.append(record)
 
             if len(session_memory) > self.max_memory_items:
-
-                self._memory[session_id] = (
-                    session_memory[
-                        -self.max_memory_items:
-                    ]
-                )
+                self._memory[session_id] = session_memory[-self.max_memory_items :]
 
         logger.debug(
             "Added memory item for session=%s",
@@ -289,7 +257,6 @@ class MemoryRAG:
             return []
 
         with self._lock:
-
             records = list(
                 self._memory.get(
                     session_id,
@@ -300,7 +267,6 @@ class MemoryRAG:
         records.reverse()
 
         if limit is not None:
-
             if limit <= 0:
                 return []
 
@@ -333,22 +299,14 @@ class MemoryRAG:
         if not query_tokens:
             return 0.0
 
-        record_text = (
-            f"{record.user_query} "
-            f"{record.assistant_response}"
-        )
+        record_text = f"{record.user_query} " f"{record.assistant_response}"
 
-        record_tokens = cls._tokenize(
-            record_text
-        )
+        record_tokens = cls._tokenize(record_text)
 
         if not record_tokens:
             return 0.0
 
-        overlap = (
-            len(query_tokens & record_tokens)
-            / len(query_tokens)
-        )
+        overlap = len(query_tokens & record_tokens) / len(query_tokens)
 
         age_seconds = max(
             0.0,
@@ -356,14 +314,9 @@ class MemoryRAG:
         )
 
         # Recency decays gradually over approximately one hour.
-        recency = 1.0 / (
-            1.0 + age_seconds / 3600.0
-        )
+        recency = 1.0 / (1.0 + age_seconds / 3600.0)
 
-        return (
-            0.8 * overlap
-            + 0.2 * recency
-        )
+        return 0.8 * overlap + 0.2 * recency
 
     def get_relevant_memory(
         self,
@@ -382,9 +335,7 @@ class MemoryRAG:
         if not session_id or not query:
             return []
 
-        records = self.get_session_memory(
-            session_id
-        )
+        records = self.get_session_memory(session_id)
 
         if not records:
             return []
@@ -414,10 +365,7 @@ class MemoryRAG:
         if top_k <= 0:
             return []
 
-        return [
-            record
-            for _, record in scored_records[:top_k]
-        ]
+        return [record for _, record in scored_records[:top_k]]
 
     # ========================================================
     # Format Memory
@@ -444,16 +392,12 @@ class MemoryRAG:
             records,
             start=1,
         ):
-
             sections.append(
                 "\n".join(
                     [
                         f"Previous Turn {index}:",
                         f"User: {record.user_query}",
-                        (
-                            "Assistant: "
-                            f"{record.assistant_response}"
-                        ),
+                        ("Assistant: " f"{record.assistant_response}"),
                     ]
                 )
             )
@@ -498,9 +442,7 @@ class MemoryRAG:
         with self._lock:
             self._memory.clear()
 
-        logger.debug(
-            "Cleared all conversation memory."
-        )
+        logger.debug("Cleared all conversation memory.")
 
     # ========================================================
     # Cache Key
@@ -530,13 +472,9 @@ class MemoryRAG:
         Create deterministic hash for retrieval/context data.
         """
 
-        payload = cls._stable_json(
-            context
-        )
+        payload = cls._stable_json(context)
 
-        return hashlib.sha256(
-            payload.encode("utf-8")
-        ).hexdigest()
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def create_cache_key(
         self,
@@ -555,36 +493,25 @@ class MemoryRAG:
         """
 
         if not query or not query.strip():
-            raise ValueError(
-                "query is required for cache key."
-            )
+            raise ValueError("query is required for cache key.")
 
-        model = (
-            model_version
-            or getattr(
-                self.settings,
-                "LLM_MODEL",
-                "",
-            )
+        model = model_version or getattr(
+            self.settings,
+            "LLM_MODEL",
+            "",
         )
 
         payload = {
             "query": query.strip(),
-            "context_hash": self.build_context_hash(
-                context
-            ),
+            "context_hash": self.build_context_hash(context),
             "session_id": session_id or "",
             "model_version": model,
             "prompt_version": prompt_version,
         }
 
-        serialized = self._stable_json(
-            payload
-        )
+        serialized = self._stable_json(payload)
 
-        return hashlib.sha256(
-            serialized.encode("utf-8")
-        ).hexdigest()
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     # ========================================================
     # Cache Set
@@ -610,20 +537,12 @@ class MemoryRAG:
             return None
 
         if not key:
-            raise ValueError(
-                "Cache key cannot be empty."
-            )
+            raise ValueError("Cache key cannot be empty.")
 
-        ttl = (
-            ttl_seconds
-            if ttl_seconds is not None
-            else self.cache_ttl_seconds
-        )
+        ttl = ttl_seconds if ttl_seconds is not None else self.cache_ttl_seconds
 
         if ttl <= 0:
-            raise ValueError(
-                "ttl_seconds must be greater than zero."
-            )
+            raise ValueError("ttl_seconds must be greater than zero.")
 
         now = time.time()
 
@@ -633,18 +552,10 @@ class MemoryRAG:
             created_at=now,
             expires_at=now + ttl,
             session_id=session_id,
-            document_ids=list(
-                document_ids or []
-            ),
-            jd_ids=list(
-                jd_ids or []
-            ),
-            candidate_ids=list(
-                candidate_ids or []
-            ),
-            metadata=dict(
-                metadata or {}
-            ),
+            document_ids=list(document_ids or []),
+            jd_ids=list(jd_ids or []),
+            candidate_ids=list(candidate_ids or []),
+            metadata=dict(metadata or {}),
         )
 
         with self._lock:
@@ -674,9 +585,7 @@ class MemoryRAG:
             - expired entry
         """
 
-        record = self.get_cache_record(
-            key
-        )
+        record = self.get_cache_record(key)
 
         if record is None:
             return None
@@ -702,14 +611,12 @@ class MemoryRAG:
             return None
 
         with self._lock:
-
             record = self._cache.get(key)
 
             if record is None:
                 return None
 
             if record.expires_at <= time.time():
-
                 self._cache.pop(
                     key,
                     None,
@@ -743,7 +650,6 @@ class MemoryRAG:
             return False
 
         with self._lock:
-
             existed = key in self._cache
 
             self._cache.pop(
@@ -775,62 +681,34 @@ class MemoryRAG:
             - session reset
         """
 
-        document_set = set(
-            document_ids or []
-        )
+        document_set = set(document_ids or [])
 
-        jd_set = set(
-            jd_ids or []
-        )
+        jd_set = set(jd_ids or [])
 
-        candidate_set = set(
-            candidate_ids or []
-        )
+        candidate_set = set(candidate_ids or [])
 
         removed = 0
 
         with self._lock:
-
             keys_to_remove: list[str] = []
 
             for key, record in self._cache.items():
-
                 should_remove = False
 
-                if (
-                    session_id
-                    and record.session_id == session_id
-                ):
+                if session_id and record.session_id == session_id:
                     should_remove = True
 
-                if (
-                    document_set
-                    and document_set.intersection(
-                        record.document_ids
-                    )
-                ):
+                if document_set and document_set.intersection(record.document_ids):
                     should_remove = True
 
-                if (
-                    jd_set
-                    and jd_set.intersection(
-                        record.jd_ids
-                    )
-                ):
+                if jd_set and jd_set.intersection(record.jd_ids):
                     should_remove = True
 
-                if (
-                    candidate_set
-                    and candidate_set.intersection(
-                        record.candidate_ids
-                    )
-                ):
+                if candidate_set and candidate_set.intersection(record.candidate_ids):
                     should_remove = True
 
                 if should_remove:
-                    keys_to_remove.append(
-                        key
-                    )
+                    keys_to_remove.append(key)
 
             for key in keys_to_remove:
                 self._cache.pop(
@@ -858,9 +736,7 @@ class MemoryRAG:
         with self._lock:
             self._cache.clear()
 
-        logger.debug(
-            "Cleared all cache entries."
-        )
+        logger.debug("Cleared all cache entries.")
 
     # ========================================================
     # Cleanup
@@ -879,15 +755,11 @@ class MemoryRAG:
         removed = 0
 
         with self._lock:
-
             expired_keys = [
-                key
-                for key, record in self._cache.items()
-                if record.expires_at <= now
+                key for key, record in self._cache.items() if record.expires_at <= now
             ]
 
             for key in expired_keys:
-
                 self._cache.pop(
                     key,
                     None,
@@ -913,19 +785,11 @@ class MemoryRAG:
         """
 
         with self._lock:
+            memory_sessions = len(self._memory)
 
-            memory_sessions = len(
-                self._memory
-            )
+            memory_items = sum(len(records) for records in self._memory.values())
 
-            memory_items = sum(
-                len(records)
-                for records in self._memory.values()
-            )
-
-            cache_items = len(
-                self._cache
-            )
+            cache_items = len(self._cache)
 
         return {
             "memory_enabled": True,
@@ -952,7 +816,6 @@ def create_memory_rag() -> MemoryRAG:
     global _memory_rag
 
     if _memory_rag is None:
-
         _memory_rag = MemoryRAG()
 
     return _memory_rag

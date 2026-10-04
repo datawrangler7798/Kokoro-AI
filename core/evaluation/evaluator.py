@@ -24,12 +24,11 @@ from typing import Any, Iterable, Sequence
 from utils.config import get_settings
 from utils.logger import logger
 from utils.schemas import (
-    EvaluationSample,
     EvaluationResult,
+    EvaluationSample,
     RagasEvaluationResult,
     RetrievalEvaluationResult,
 )
-
 
 # ============================================================
 # Retrieval Metrics
@@ -61,11 +60,7 @@ def precision_at_k(
     if not retrieved:
         return 0.0
 
-    hits = sum(
-        1
-        for item_id in retrieved
-        if item_id in relevant
-    )
+    hits = sum(1 for item_id in retrieved if item_id in relevant)
 
     return hits / k
 
@@ -90,13 +85,9 @@ def recall_at_k(
     if not relevant:
         return 0.0
 
-    retrieved = set(
-        ranked_ids[:k]
-    )
+    retrieved = set(ranked_ids[:k])
 
-    hits = len(
-        retrieved.intersection(relevant)
-    )
+    hits = len(retrieved.intersection(relevant))
 
     return hits / len(relevant)
 
@@ -153,15 +144,9 @@ def dcg_at_k(
         ranked_ids[:k],
         start=1,
     ):
-        relevance = (
-            1.0
-            if item_id in relevant
-            else 0.0
-        )
+        relevance = 1.0 if item_id in relevant else 0.0
 
-        score += relevance / math.log2(
-            rank + 1
-        )
+        score += relevance / math.log2(rank + 1)
 
     return score
 
@@ -217,24 +202,15 @@ class RetrievalEvaluator:
         self,
         k_values: Sequence[int] | None = None,
     ) -> None:
-
         settings = get_settings()
 
         if k_values is None:
             k_values = settings.get_evaluation_k_values()
 
-        self.k_values = sorted(
-            {
-                int(k)
-                for k in k_values
-                if int(k) > 0
-            }
-        )
+        self.k_values = sorted({int(k) for k in k_values if int(k) > 0})
 
         if not self.k_values:
-            raise ValueError(
-                "At least one valid K value is required."
-            )
+            raise ValueError("At least one valid K value is required.")
 
     def evaluate(
         self,
@@ -247,40 +223,29 @@ class RetrievalEvaluator:
         Evaluate one retrieval query.
         """
 
-        relevant = list(
-            dict.fromkeys(
-                relevant_ids
-            )
-        )
+        relevant = list(dict.fromkeys(relevant_ids))
 
         precision_scores: dict[str, float] = {}
         recall_scores: dict[str, float] = {}
         ndcg_scores: dict[str, float] = {}
 
         for k in self.k_values:
-
-            precision_scores[str(k)] = (
-                precision_at_k(
-                    ranked_ids,
-                    relevant,
-                    k,
-                )
+            precision_scores[str(k)] = precision_at_k(
+                ranked_ids,
+                relevant,
+                k,
             )
 
-            recall_scores[str(k)] = (
-                recall_at_k(
-                    ranked_ids,
-                    relevant,
-                    k,
-                )
+            recall_scores[str(k)] = recall_at_k(
+                ranked_ids,
+                relevant,
+                k,
             )
 
-            ndcg_scores[str(k)] = (
-                ndcg_at_k(
-                    ranked_ids,
-                    relevant,
-                    k,
-                )
+            ndcg_scores[str(k)] = ndcg_at_k(
+                ranked_ids,
+                relevant,
+                k,
             )
 
         mrr = reciprocal_rank(
@@ -315,14 +280,9 @@ class RagasEvaluator:
         self,
         enabled: bool | None = None,
     ) -> None:
-
         settings = get_settings()
 
-        self.enabled = (
-            enabled
-            if enabled is not None
-            else settings.ENABLE_RAGAS
-        )
+        self.enabled = enabled if enabled is not None else settings.ENABLE_RAGAS
 
     def evaluate(
         self,
@@ -342,19 +302,11 @@ class RagasEvaluator:
             return None
 
         try:
-            from ragas import evaluate
-            from ragas import EvaluationDataset
+            from ragas import EvaluationDataset, evaluate
             from ragas.llms import LangchainLLMWrapper
-            from ragas.metrics import (
-                ContextPrecision,
-                ContextRecall,
-                Faithfulness,
-            )
+            from ragas.metrics import ContextPrecision, ContextRecall, Faithfulness
         except ImportError:
-
-            logger.warning(
-                "RAGAS is enabled but not installed."
-            )
+            logger.warning("RAGAS is enabled but not installed.")
 
             return None
 
@@ -367,9 +319,7 @@ class RagasEvaluator:
         if reference is not None:
             sample["reference"] = reference
 
-        dataset = EvaluationDataset.from_list(
-            [sample]
-        )
+        dataset = EvaluationDataset.from_list([sample])
 
         try:
             settings = get_settings()
@@ -396,9 +346,7 @@ class RagasEvaluator:
                 llm=ragas_llm,
             )
 
-            scores = dict(
-                result.scores[0]
-            )
+            scores = dict(result.scores[0])
 
             def optional_score(name: str) -> float | None:
                 value = scores.get(name)
@@ -416,7 +364,6 @@ class RagasEvaluator:
             )
 
         except Exception as exc:
-
             logger.exception(
                 "RAGAS evaluation failed: %s",
                 exc,
@@ -445,18 +392,11 @@ class Evaluator:
         retrieval_evaluator: RetrievalEvaluator | None = None,
         ragas_evaluator: RagasEvaluator | None = None,
     ) -> None:
-
         self.settings = get_settings()
 
-        self.retrieval_evaluator = (
-            retrieval_evaluator
-            or RetrievalEvaluator()
-        )
+        self.retrieval_evaluator = retrieval_evaluator or RetrievalEvaluator()
 
-        self.ragas_evaluator = (
-            ragas_evaluator
-            or RagasEvaluator()
-        )
+        self.ragas_evaluator = ragas_evaluator or RagasEvaluator()
 
     # ========================================================
     # Retrieval Evaluation
@@ -519,21 +459,17 @@ class Evaluator:
         for one evaluation sample.
         """
 
-        retrieval_result = (
-            self.evaluate_retrieval(
-                query=sample.question,
-                ranked_ids=ranked_ids,
-                relevant_ids=sample.relevant_ids,
-            )
+        retrieval_result = self.evaluate_retrieval(
+            query=sample.question,
+            ranked_ids=ranked_ids,
+            relevant_ids=sample.relevant_ids,
         )
 
-        ragas_result = (
-            self.evaluate_generation(
-                question=sample.question,
-                answer=answer,
-                contexts=contexts,
-                reference=sample.reference_answer,
-            )
+        ragas_result = self.evaluate_generation(
+            question=sample.question,
+            answer=answer,
+            contexts=contexts,
+            reference=sample.reference_answer,
         )
 
         return EvaluationResult(

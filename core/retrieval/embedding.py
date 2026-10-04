@@ -35,7 +35,6 @@ from utils.config import get_settings
 from utils.logger import logger
 from utils.utils import get_llm_rate_limiter
 
-
 # ============================================================
 # Constants
 # ============================================================
@@ -81,7 +80,6 @@ class GeminiEmbeddingService:
         batch_size: int = DEFAULT_BATCH_SIZE,
         max_retries: int = MAX_RETRIES,
     ) -> None:
-
         self.config = get_settings()
 
         # --------------------------------------------------------
@@ -94,19 +92,13 @@ class GeminiEmbeddingService:
         # embedding space.
         #
 
-        self.model_name = (
-            model_name
-            or self.config.EMBEDDING_MODEL
-        )
+        self.model_name = model_name or self.config.EMBEDDING_MODEL
 
         # --------------------------------------------------------
         # Embedding dimension
         # --------------------------------------------------------
 
-        self.dimension = (
-            dimension
-            or self.config.EMBEDDING_DIMENSION
-        )
+        self.dimension = dimension or self.config.EMBEDDING_DIMENSION
 
         # --------------------------------------------------------
         # Validate Kokoro embedding configuration
@@ -127,14 +119,10 @@ class GeminiEmbeddingService:
             )
 
         if batch_size <= 0:
-            raise ValueError(
-                "batch_size must be greater than zero."
-            )
+            raise ValueError("batch_size must be greater than zero.")
 
         if max_retries < 0:
-            raise ValueError(
-                "max_retries cannot be negative."
-            )
+            raise ValueError("max_retries cannot be negative.")
 
         self.batch_size = batch_size
         self.max_retries = max_retries
@@ -153,12 +141,8 @@ class GeminiEmbeddingService:
         """
 
         if self._client is None:
-
             if not self.config.GOOGLE_API_KEY:
-                raise ValueError(
-                    "GOOGLE_API_KEY is required "
-                    "for Gemini embeddings."
-                )
+                raise ValueError("GOOGLE_API_KEY is required " "for Gemini embeddings.")
 
             self._client = genai.Client(
                 api_key=(
@@ -167,9 +151,7 @@ class GeminiEmbeddingService:
                         self.config.GOOGLE_API_KEY,
                         "get_secret_value",
                     )
-                    else str(
-                        self.config.GOOGLE_API_KEY
-                    )
+                    else str(self.config.GOOGLE_API_KEY)
                 )
             )
 
@@ -193,14 +175,9 @@ class GeminiEmbeddingService:
         """
 
         if not embedding:
-            raise ValueError(
-                "Gemini returned an empty embedding."
-            )
+            raise ValueError("Gemini returned an empty embedding.")
 
-        vector = [
-            float(value)
-            for value in embedding
-        ]
+        vector = [float(value) for value in embedding]
 
         if len(vector) != self.dimension:
             raise ValueError(
@@ -242,21 +219,14 @@ class GeminiEmbeddingService:
             DOCUMENT_TASK_TYPE,
             QUERY_TASK_TYPE,
         }:
-            raise ValueError(
-                "Unsupported Gemini embedding task type: "
-                f"{task_type}"
-            )
+            raise ValueError("Unsupported Gemini embedding task type: " f"{task_type}")
 
         client = self._get_client()
 
         last_exception: Exception | None = None
 
-        for attempt in range(
-            self.max_retries + 1
-        ):
-
+        for attempt in range(self.max_retries + 1):
             try:
-
                 self._rate_limiter.acquire()
 
                 response = client.models.embed_content(
@@ -271,9 +241,7 @@ class GeminiEmbeddingService:
                 embeddings = response.embeddings
 
                 if not embeddings:
-                    raise RuntimeError(
-                        "Gemini returned no embeddings."
-                    )
+                    raise RuntimeError("Gemini returned no embeddings.")
 
                 if len(embeddings) != len(texts):
                     raise RuntimeError(
@@ -286,7 +254,6 @@ class GeminiEmbeddingService:
                 result: list[list[float]] = []
 
                 for embedding in embeddings:
-
                     values = getattr(
                         embedding,
                         "values",
@@ -295,26 +262,21 @@ class GeminiEmbeddingService:
 
                     if values is None:
                         raise RuntimeError(
-                            "Gemini returned an embedding "
-                            "without vector values."
+                            "Gemini returned an embedding " "without vector values."
                         )
 
-                    result.append(
-                        self._validate_embedding(values)
-                    )
+                    result.append(self._validate_embedding(values))
 
                 return result
 
             except Exception as exc:
-
                 last_exception = exc
 
                 if attempt >= self.max_retries:
                     break
 
                 delay = min(
-                    INITIAL_RETRY_DELAY_SECONDS
-                    * (2**attempt),
+                    INITIAL_RETRY_DELAY_SECONDS * (2**attempt),
                     MAX_RETRY_DELAY_SECONDS,
                 )
 
@@ -329,8 +291,7 @@ class GeminiEmbeddingService:
                 time.sleep(delay)
 
         raise RuntimeError(
-            "Gemini embedding request failed "
-            f"after {self.max_retries + 1} attempts."
+            "Gemini embedding request failed " f"after {self.max_retries + 1} attempts."
         ) from last_exception
 
     # ========================================================
@@ -358,18 +319,13 @@ class GeminiEmbeddingService:
         normalized_texts: list[str] = []
 
         for text in texts:
-
             if not isinstance(text, str):
-                raise TypeError(
-                    "All embedding inputs must be strings."
-                )
+                raise TypeError("All embedding inputs must be strings.")
 
             cleaned = text.strip()
 
             if not cleaned:
-                raise ValueError(
-                    "Cannot embed empty text."
-                )
+                raise ValueError("Cannot embed empty text.")
 
             normalized_texts.append(cleaned)
 
@@ -380,10 +336,7 @@ class GeminiEmbeddingService:
             len(normalized_texts),
             self.batch_size,
         ):
-
-            batch = normalized_texts[
-                start : start + self.batch_size
-            ]
+            batch = normalized_texts[start : start + self.batch_size]
 
             embeddings = self._embed_batch(
                 batch,
@@ -392,13 +345,8 @@ class GeminiEmbeddingService:
 
             all_embeddings.extend(embeddings)
 
-        if len(all_embeddings) != len(
-            normalized_texts
-        ):
-            raise RuntimeError(
-                "Final embedding count does not match "
-                "input count."
-            )
+        if len(all_embeddings) != len(normalized_texts):
+            raise RuntimeError("Final embedding count does not match " "input count.")
 
         return all_embeddings
 
@@ -420,10 +368,7 @@ class GeminiEmbeddingService:
         if not documents:
             return []
 
-        texts = [
-            document.page_content
-            for document in documents
-        ]
+        texts = [document.page_content for document in documents]
 
         return self.embed_texts(texts)
 
@@ -447,16 +392,12 @@ class GeminiEmbeddingService:
         """
 
         if not isinstance(query, str):
-            raise TypeError(
-                "Query must be a string."
-            )
+            raise TypeError("Query must be a string.")
 
         query = query.strip()
 
         if not query:
-            raise ValueError(
-                "Query cannot be empty."
-            )
+            raise ValueError("Query cannot be empty.")
 
         embeddings = self._embed_batch(
             [query],
@@ -464,9 +405,7 @@ class GeminiEmbeddingService:
         )
 
         if len(embeddings) != 1:
-            raise RuntimeError(
-                "Expected exactly one query embedding."
-            )
+            raise RuntimeError("Expected exactly one query embedding.")
 
         return embeddings[0]
 
@@ -528,14 +467,11 @@ class GeminiEmbeddingService:
         generate an embedding.
         """
 
-        vector = self.embed_query(
-            "health check"
-        )
+        vector = self.embed_query("health check")
 
         if len(vector) != self.dimension:
             raise RuntimeError(
-                "Embedding health check returned "
-                "an unexpected dimension."
+                "Embedding health check returned " "an unexpected dimension."
             )
 
         return True

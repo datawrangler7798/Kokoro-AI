@@ -56,7 +56,6 @@ from utils.config import get_settings
 from utils.logger import get_logger
 from utils.schemas import RetrievalMethod, RetrievalResult
 
-
 logger = get_logger(__name__)
 settings = get_settings()
 
@@ -109,9 +108,7 @@ class BM25Record:
     chunk_id: str
     text: str
 
-    metadata: dict[str, Any] = field(
-        default_factory=dict
-    )
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ============================================================
@@ -157,9 +154,7 @@ class HybridSearchResult:
 
     hybrid_score: float = 0.0
 
-    retrieval_method: RetrievalMethod = (
-        RetrievalMethod.HYBRID
-    )
+    retrieval_method: RetrievalMethod = RetrievalMethod.HYBRID
 
 
 # ============================================================
@@ -187,20 +182,14 @@ class BM25Backend:
         *,
         tokenizer: Any | None = None,
     ) -> None:
-
-        self._tokenizer = (
-            tokenizer
-            or self.default_tokenizer
-        )
+        self._tokenizer = tokenizer or self.default_tokenizer
 
         self._records: dict[
             str,
             BM25Record,
         ] = {}
 
-        self._tokenized_corpus: list[
-            list[str]
-        ] = []
+        self._tokenized_corpus: list[list[str]] = []
 
         self._record_ids: list[str] = []
 
@@ -237,39 +226,24 @@ class BM25Backend:
         current: list[str] = []
 
         for character in normalized:
-
-            if (
-                character.isalnum()
-                or character in (
-                    "_",
-                    "-",
-                    ".",
-                    "#",
-                    "+",
-                )
+            if character.isalnum() or character in (
+                "_",
+                "-",
+                ".",
+                "#",
+                "+",
             ):
-                current.append(
-                    character
-                )
+                current.append(character)
 
             else:
-
                 if current:
-                    tokens.append(
-                        "".join(current)
-                    )
+                    tokens.append("".join(current))
                     current = []
 
         if current:
-            tokens.append(
-                "".join(current)
-            )
+            tokens.append("".join(current))
 
-        return [
-            token
-            for token in tokens
-            if token
-        ]
+        return [token for token in tokens if token]
 
     # --------------------------------------------------------
     # Build
@@ -279,17 +253,10 @@ class BM25Backend:
         """Rebuild the BM25 model from the current records."""
 
         with self._lock:
-
-            self._record_ids = list(
-                self._records.keys()
-            )
+            self._record_ids = list(self._records.keys())
 
             self._tokenized_corpus = [
-                self._tokenizer(
-                    self._records[
-                        record_id
-                    ].text
-                )
+                self._tokenizer(self._records[record_id].text)
                 for record_id in self._record_ids
             ]
 
@@ -298,17 +265,11 @@ class BM25Backend:
                 return
 
             try:
-                from rank_bm25 import (
-                    BM25Okapi,
-                )
+                from rank_bm25 import BM25Okapi
             except ImportError as exc:
-                raise RuntimeError(
-                    "rank-bm25 is required for BM25 retrieval."
-                ) from exc
+                raise RuntimeError("rank-bm25 is required for BM25 retrieval.") from exc
 
-            self._bm25 = BM25Okapi(
-                self._tokenized_corpus
-            )
+            self._bm25 = BM25Okapi(self._tokenized_corpus)
 
     # --------------------------------------------------------
     # Upsert
@@ -329,20 +290,14 @@ class BM25Backend:
             return 0
 
         with self._lock:
-
             for record in records:
-
                 if not record.chunk_id:
-                    raise ValueError(
-                        "BM25 record requires chunk_id."
-                    )
+                    raise ValueError("BM25 record requires chunk_id.")
 
                 if not record.text.strip():
                     continue
 
-                self._records[
-                    record.chunk_id
-                ] = record
+                self._records[record.chunk_id] = record
 
             self._rebuild()
 
@@ -369,16 +324,9 @@ class BM25Backend:
         deleted = 0
 
         with self._lock:
-
             for chunk_id in chunk_ids:
-
-                if (
-                    chunk_id
-                    in self._records
-                ):
-                    del self._records[
-                        chunk_id
-                    ]
+                if chunk_id in self._records:
+                    del self._records[chunk_id]
                     deleted += 1
 
             if deleted:
@@ -409,47 +357,27 @@ class BM25Backend:
         matching_ids: list[str] = []
 
         with self._lock:
-
-            for chunk_id, record in (
-                self._records.items()
-            ):
-
+            for chunk_id, record in self._records.items():
                 metadata = record.metadata
 
                 if (
                     document_id is not None
-                    and metadata.get(
-                        "document_id"
-                    )
-                    != document_id
+                    and metadata.get("document_id") != document_id
                 ):
                     continue
 
                 if (
                     candidate_id is not None
-                    and metadata.get(
-                        "candidate_id"
-                    )
-                    != candidate_id
+                    and metadata.get("candidate_id") != candidate_id
                 ):
                     continue
 
-                if (
-                    jd_id is not None
-                    and metadata.get(
-                        "jd_id"
-                    )
-                    != jd_id
-                ):
+                if jd_id is not None and metadata.get("jd_id") != jd_id:
                     continue
 
-                matching_ids.append(
-                    chunk_id
-                )
+                matching_ids.append(chunk_id)
 
-            return self.delete(
-                matching_ids
-            )
+            return self.delete(matching_ids)
 
     # --------------------------------------------------------
     # Search
@@ -470,34 +398,23 @@ class BM25Backend:
         Filtering is applied after scoring.
         """
 
-        if (
-            not query
-            or not query.strip()
-            or top_k <= 0
-        ):
+        if not query or not query.strip() or top_k <= 0:
             return []
 
         with self._lock:
-
             if self._bm25 is None:
                 return []
 
-            query_tokens = self._tokenizer(
-                query
-            )
+            query_tokens = self._tokenizer(query)
 
             if not query_tokens:
                 return []
 
-            scores = self._bm25.get_scores(
-                query_tokens
-            )
+            scores = self._bm25.get_scores(query_tokens)
 
             ranked_indexes = sorted(
                 range(len(scores)),
-                key=lambda index: scores[
-                    index
-                ],
+                key=lambda index: scores[index],
                 reverse=True,
             )
 
@@ -509,10 +426,7 @@ class BM25Backend:
             ] = []
 
             for index in ranked_indexes:
-
-                score = float(
-                    scores[index]
-                )
+                score = float(scores[index])
 
                 # BM25 ranks every corpus row, including rows with
                 # no overlapping query terms. Those zero-score rows
@@ -520,15 +434,9 @@ class BM25Backend:
                 if score <= 0.0:
                     break
 
-                record_id = (
-                    self._record_ids[
-                        index
-                    ]
-                )
+                record_id = self._record_ids[index]
 
-                record = self._records[
-                    record_id
-                ]
+                record = self._records[record_id]
 
                 if not self._matches_filters(
                     record,
@@ -574,19 +482,14 @@ class BM25Backend:
         # Document type
         # --------------------------------------------
 
-        document_type = filters.get(
-            "document_type"
-        )
+        document_type = filters.get("document_type")
 
         if document_type is not None:
-
             if hasattr(
                 document_type,
                 "value",
             ):
-                document_type = (
-                    document_type.value
-                )
+                document_type = document_type.value
 
             if isinstance(
                 document_type,
@@ -596,10 +499,7 @@ class BM25Backend:
                     set,
                 ),
             ):
-                allowed = {
-                    str(value)
-                    for value in document_type
-                }
+                allowed = {str(value) for value in document_type}
 
                 actual = str(
                     metadata.get(
@@ -623,56 +523,30 @@ class BM25Backend:
         # Candidate ID
         # --------------------------------------------
 
-        candidate_id = filters.get(
-            "candidate_id"
-        )
+        candidate_id = filters.get("candidate_id")
 
-        if (
-            candidate_id is not None
-            and metadata.get(
-                "candidate_id"
-            )
-            != candidate_id
-        ):
+        if candidate_id is not None and metadata.get("candidate_id") != candidate_id:
             return False
 
-        candidate_ids = filters.get(
-            "candidate_ids"
-        )
+        candidate_ids = filters.get("candidate_ids")
 
-        if (
-            candidate_ids
-            and metadata.get(
-                "candidate_id"
-            )
-            not in candidate_ids
-        ):
+        if candidate_ids and metadata.get("candidate_id") not in candidate_ids:
             return False
 
         # --------------------------------------------
         # JD ID
         # --------------------------------------------
 
-        jd_id = filters.get(
-            "jd_id"
-        )
+        jd_id = filters.get("jd_id")
 
-        if (
-            jd_id is not None
-            and metadata.get(
-                "jd_id"
-            )
-            != jd_id
-        ):
+        if jd_id is not None and metadata.get("jd_id") != jd_id:
             return False
 
         # --------------------------------------------
         # Location
         # --------------------------------------------
 
-        location = filters.get(
-            "location"
-        )
+        location = filters.get("location")
 
         if (
             location is not None
@@ -690,23 +564,16 @@ class BM25Backend:
         # Experience
         # --------------------------------------------
 
-        experience = metadata.get(
-            "experience_years"
-        )
+        experience = metadata.get("experience_years")
 
-        min_experience = filters.get(
-            "min_experience"
-        )
+        min_experience = filters.get("min_experience")
 
         if min_experience is not None:
-
             if experience is None:
                 return False
 
             try:
-                if float(experience) < float(
-                    min_experience
-                ):
+                if float(experience) < float(min_experience):
                     return False
             except (
                 TypeError,
@@ -714,19 +581,14 @@ class BM25Backend:
             ):
                 return False
 
-        max_experience = filters.get(
-            "max_experience"
-        )
+        max_experience = filters.get("max_experience")
 
         if max_experience is not None:
-
             if experience is None:
                 return False
 
             try:
-                if float(experience) > float(
-                    max_experience
-                ):
+                if float(experience) > float(max_experience):
                     return False
             except (
                 TypeError,
@@ -738,12 +600,9 @@ class BM25Backend:
         # Skills
         # --------------------------------------------
 
-        required_skills = filters.get(
-            "skills"
-        )
+        required_skills = filters.get("skills")
 
         if required_skills:
-
             indexed_skills = metadata.get(
                 "skills",
                 [],
@@ -753,23 +612,13 @@ class BM25Backend:
                 indexed_skills,
                 str,
             ):
-                indexed_skills = [
-                    indexed_skills
-                ]
+                indexed_skills = [indexed_skills]
 
-            indexed_normalized = {
-                str(skill).lower()
-                for skill in indexed_skills
-            }
+            indexed_normalized = {str(skill).lower() for skill in indexed_skills}
 
-            requested_normalized = {
-                str(skill).lower()
-                for skill in required_skills
-            }
+            requested_normalized = {str(skill).lower() for skill in required_skills}
 
-            if not requested_normalized.issubset(
-                indexed_normalized
-            ):
+            if not requested_normalized.issubset(indexed_normalized):
                 return False
 
         return True
@@ -782,15 +631,12 @@ class BM25Backend:
         """Return number of BM25 records."""
 
         with self._lock:
-            return len(
-                self._records
-            )
+            return len(self._records)
 
     def clear(self) -> None:
         """Remove all BM25 records."""
 
         with self._lock:
-
             self._records.clear()
 
             self._record_ids.clear()
@@ -822,7 +668,6 @@ class BM25Backend:
         )
 
         with self._lock:
-
             payload = {
                 "records": [
                     {
@@ -858,32 +703,23 @@ class BM25Backend:
         if not source.exists():
             return 0
 
-        payload = json.loads(
-            source.read_text(
-                encoding="utf-8"
-            )
-        )
+        payload = json.loads(source.read_text(encoding="utf-8"))
 
         records = payload.get(
             "records",
             [],
         )
 
-        loaded_records: list[
-            BM25Record
-        ] = []
+        loaded_records: list[BM25Record] = []
 
         for item in records:
-
             if not isinstance(
                 item,
                 Mapping,
             ):
                 continue
 
-            chunk_id = item.get(
-                "chunk_id"
-            )
+            chunk_id = item.get("chunk_id")
 
             text = item.get(
                 "text",
@@ -895,9 +731,7 @@ class BM25Backend:
 
             loaded_records.append(
                 BM25Record(
-                    chunk_id=str(
-                        chunk_id
-                    ),
+                    chunk_id=str(chunk_id),
                     text=str(text),
                     metadata=dict(
                         item.get(
@@ -909,9 +743,7 @@ class BM25Backend:
                 )
             )
 
-        self.upsert(
-            loaded_records
-        )
+        self.upsert(loaded_records)
 
         logger.info(
             "Loaded BM25 corpus: %d records.",
@@ -949,27 +781,17 @@ class HybridIndexer:
         semantic_weight: float | None = None,
         keyword_weight: float | None = None,
     ) -> None:
+        self.semantic_retriever = semantic_retriever
 
-        self.semantic_retriever = (
-            semantic_retriever
-        )
-
-        self.bm25 = (
-            bm25_backend
-            or BM25Backend()
-        )
+        self.bm25 = bm25_backend or BM25Backend()
 
         self.semantic_weight = (
-            settings.SEMANTIC_WEIGHT
-            if semantic_weight is None
-            else semantic_weight
+            settings.SEMANTIC_WEIGHT if semantic_weight is None else semantic_weight
         )
 
         # Current configuration uses LEXICAL_WEIGHT.
         self.keyword_weight = (
-            settings.LEXICAL_WEIGHT
-            if keyword_weight is None
-            else keyword_weight
+            settings.LEXICAL_WEIGHT if keyword_weight is None else keyword_weight
         )
 
         self._validate_weights()
@@ -981,38 +803,20 @@ class HybridIndexer:
     def _validate_weights(self) -> None:
         """Validate hybrid fusion weights."""
 
-        if not (
-            0.0
-            <= self.semantic_weight
-            <= 1.0
-        ):
-            raise ValueError(
-                "semantic_weight must be between 0 and 1."
-            )
+        if not (0.0 <= self.semantic_weight <= 1.0):
+            raise ValueError("semantic_weight must be between 0 and 1.")
 
-        if not (
-            0.0
-            <= self.keyword_weight
-            <= 1.0
-        ):
-            raise ValueError(
-                "keyword_weight must be between 0 and 1."
-            )
+        if not (0.0 <= self.keyword_weight <= 1.0):
+            raise ValueError("keyword_weight must be between 0 and 1.")
 
-        total = (
-            self.semantic_weight
-            + self.keyword_weight
-        )
+        total = self.semantic_weight + self.keyword_weight
 
         if not math.isclose(
             total,
             1.0,
             abs_tol=1e-6,
         ):
-            raise ValueError(
-                "semantic_weight + keyword_weight "
-                "must equal 1.0."
-            )
+            raise ValueError("semantic_weight + keyword_weight " "must equal 1.0.")
 
     # --------------------------------------------------------
     # BM25 Indexing
@@ -1024,7 +828,6 @@ class HybridIndexer:
         key: str,
         default: Any = None,
     ) -> Any:
-
         if isinstance(
             obj,
             Mapping,
@@ -1075,9 +878,7 @@ class HybridIndexer:
         )
 
         if not chunk_id:
-            raise ValueError(
-                "Chunk requires chunk_id for BM25 indexing."
-            )
+            raise ValueError("Chunk requires chunk_id for BM25 indexing.")
 
         text = (
             cls._extract_value(
@@ -1096,9 +897,7 @@ class HybridIndexer:
         )
 
         if not text.strip():
-            raise ValueError(
-                f"Chunk {chunk_id} has empty text."
-            )
+            raise ValueError(f"Chunk {chunk_id} has empty text.")
 
         # Keep important retrieval metadata available
         # even when it was supplied as top-level fields.
@@ -1114,7 +913,6 @@ class HybridIndexer:
             "section",
             "page",
         ):
-
             value = cls._extract_value(
                 chunk,
                 key,
@@ -1127,9 +925,7 @@ class HybridIndexer:
                 )
 
         return BM25Record(
-            chunk_id=str(
-                chunk_id
-            ),
+            chunk_id=str(chunk_id),
             text=str(text),
             metadata=metadata,
         )
@@ -1144,16 +940,9 @@ class HybridIndexer:
         Pinecone indexing is handled by vector_store.py.
         """
 
-        records = [
-            self._chunk_to_bm25_record(
-                chunk
-            )
-            for chunk in chunks
-        ]
+        records = [self._chunk_to_bm25_record(chunk) for chunk in chunks]
 
-        return self.bm25.upsert(
-            records
-        )
+        return self.bm25.upsert(records)
 
     def add_documents(
         self,
@@ -1182,10 +971,7 @@ class HybridIndexer:
         if not scores:
             return {}
 
-        values = [
-            float(value)
-            for value in scores.values()
-        ]
+        values = [float(value) for value in scores.values()]
 
         minimum = min(values)
         maximum = max(values)
@@ -1198,22 +984,10 @@ class HybridIndexer:
             # If every candidate has the same score, preserve
             # the fact that the candidates were retrieved while
             # avoiding arbitrary differentiation.
-            return {
-                key: (
-                    1.0
-                    if value > 0
-                    else 0.0
-                )
-                for key, value in scores.items()
-            }
+            return {key: (1.0 if value > 0 else 0.0) for key, value in scores.items()}
 
         return {
-            key: (
-                float(value) - minimum
-            )
-            / (
-                maximum - minimum
-            )
+            key: (float(value) - minimum) / (maximum - minimum)
             for key, value in scores.items()
         }
 
@@ -1234,9 +1008,7 @@ class HybridIndexer:
             filters,
             "model_dump",
         ):
-            return filters.model_dump(
-                exclude_none=True
-            )
+            return filters.model_dump(exclude_none=True)
 
         if isinstance(
             filters,
@@ -1244,13 +1016,7 @@ class HybridIndexer:
         ):
             return dict(filters)
 
-        return {
-            key: value
-            for key, value in vars(
-                filters
-            ).items()
-            if value is not None
-        }
+        return {key: value for key, value in vars(filters).items() if value is not None}
 
     # --------------------------------------------------------
     # Fusion
@@ -1258,12 +1024,8 @@ class HybridIndexer:
 
     def _fuse_results(
         self,
-        semantic_results: Sequence[
-            RetrievalResult
-        ],
-        keyword_results: Sequence[
-            Any
-        ],
+        semantic_results: Sequence[RetrievalResult],
+        keyword_results: Sequence[Any],
         *,
         top_k: int,
     ) -> list[HybridSearchResult]:
@@ -1282,20 +1044,15 @@ class HybridIndexer:
         ] = {}
 
         for result in semantic_results:
-
-            chunk_id = (
-                self._extract_value(
-                    result,
-                    "chunk_id",
-                )
+            chunk_id = self._extract_value(
+                result,
+                "chunk_id",
             )
 
             if not chunk_id:
                 continue
 
-            chunk_id = str(
-                chunk_id
-            )
+            chunk_id = str(chunk_id)
 
             score = float(
                 self._extract_value(
@@ -1306,13 +1063,9 @@ class HybridIndexer:
                 or 0.0
             )
 
-            semantic_scores[
-                chunk_id
-            ] = score
+            semantic_scores[chunk_id] = score
 
-            semantic_objects[
-                chunk_id
-            ] = result
+            semantic_objects[chunk_id] = result
 
         keyword_scores: dict[
             str,
@@ -1330,90 +1083,51 @@ class HybridIndexer:
                 record = item
                 score = self._extract_value(record, "score", 0.0)
 
-            chunk_id = str(
-                self._extract_value(record, "chunk_id", "")
-            )
+            chunk_id = str(self._extract_value(record, "chunk_id", ""))
             if not chunk_id:
                 continue
 
-            keyword_scores[
-                chunk_id
-            ] = float(score)
+            keyword_scores[chunk_id] = float(score)
 
-            keyword_objects[
-                chunk_id
-            ] = record
+            keyword_objects[chunk_id] = record
 
-        normalized_semantic = (
-            self._normalize_scores(
-                semantic_scores
-            )
-        )
+        normalized_semantic = self._normalize_scores(semantic_scores)
 
-        normalized_keyword = (
-            self._normalize_scores(
-                keyword_scores
-            )
-        )
+        normalized_keyword = self._normalize_scores(keyword_scores)
 
-        all_chunk_ids = set(
-            semantic_scores
-        ) | set(
-            keyword_scores
-        )
+        all_chunk_ids = set(semantic_scores) | set(keyword_scores)
 
-        fused: list[
-            HybridSearchResult
-        ] = []
+        fused: list[HybridSearchResult] = []
 
         for chunk_id in all_chunk_ids:
-
-            semantic_score = (
-                semantic_scores.get(
-                    chunk_id,
-                    0.0,
-                )
+            semantic_score = semantic_scores.get(
+                chunk_id,
+                0.0,
             )
 
-            keyword_score = (
-                keyword_scores.get(
-                    chunk_id,
-                    0.0,
-                )
+            keyword_score = keyword_scores.get(
+                chunk_id,
+                0.0,
             )
 
-            normalized_semantic_score = (
-                normalized_semantic.get(
-                    chunk_id,
-                    0.0,
-                )
+            normalized_semantic_score = normalized_semantic.get(
+                chunk_id,
+                0.0,
             )
 
-            normalized_keyword_score = (
-                normalized_keyword.get(
-                    chunk_id,
-                    0.0,
-                )
+            normalized_keyword_score = normalized_keyword.get(
+                chunk_id,
+                0.0,
             )
 
             hybrid_score = (
-                self.semantic_weight
-                * normalized_semantic_score
-                + self.keyword_weight
-                * normalized_keyword_score
+                self.semantic_weight * normalized_semantic_score
+                + self.keyword_weight * normalized_keyword_score
             )
 
-            semantic_result = (
-                semantic_objects.get(
-                    chunk_id
-                )
-            )
+            semantic_result = semantic_objects.get(chunk_id)
 
-            keyword_record = (
-                keyword_objects.get(
-                    chunk_id
-                )
-            )
+            keyword_record = keyword_objects.get(chunk_id)
 
             content = ""
 
@@ -1423,7 +1137,6 @@ class HybridIndexer:
             ] = {}
 
             if semantic_result is not None:
-
                 content = (
                     self._extract_value(
                         semantic_result,
@@ -1446,38 +1159,21 @@ class HybridIndexer:
                     result_metadata,
                     "model_dump",
                 ):
-                    result_metadata = (
-                        result_metadata.model_dump()
-                    )
+                    result_metadata = result_metadata.model_dump()
 
-                metadata.update(
-                    dict(
-                        result_metadata
-                    )
-                )
+                metadata.update(dict(result_metadata))
 
             if keyword_record is not None:
-
                 if not content:
-                    content = (
-                        self._extract_value(
-                            keyword_record, "text", ""
-                        )
-                        or self._extract_value(
-                            keyword_record, "content", ""
-                        )
-                    )
+                    content = self._extract_value(
+                        keyword_record, "text", ""
+                    ) or self._extract_value(keyword_record, "content", "")
 
                 # Semantic metadata remains primary; sparse results
                 # fill in any fields missing from that result.
                 for key, value in (
-                    (
-                        self._extract_value(
-                            keyword_record, "metadata", {}
-                        )
-                        or {}
-                    ).items()
-                ):
+                    self._extract_value(keyword_record, "metadata", {}) or {}
+                ).items():
                     metadata.setdefault(
                         key,
                         value,
@@ -1490,12 +1186,8 @@ class HybridIndexer:
                     metadata=metadata,
                     semantic_score=semantic_score,
                     keyword_score=keyword_score,
-                    normalized_semantic_score=(
-                        normalized_semantic_score
-                    ),
-                    normalized_keyword_score=(
-                        normalized_keyword_score
-                    ),
+                    normalized_semantic_score=(normalized_semantic_score),
+                    normalized_keyword_score=(normalized_keyword_score),
                     hybrid_score=hybrid_score,
                 )
             )
@@ -1509,9 +1201,7 @@ class HybridIndexer:
             reverse=True,
         )
 
-        return fused[
-            :top_k
-        ]
+        return fused[:top_k]
 
     # --------------------------------------------------------
     # Hybrid Search
@@ -1555,48 +1245,27 @@ class HybridIndexer:
         # BM25_TOP_K = 15
         # HYBRID_TOP_K = 10
 
-        final_top_k = (
-            top_k
-            if top_k is not None
-            else settings.HYBRID_TOP_K
-        )
+        final_top_k = top_k if top_k is not None else settings.HYBRID_TOP_K
 
         semantic_k = (
-            semantic_top_k
-            if semantic_top_k is not None
-            else settings.VECTOR_TOP_K
+            semantic_top_k if semantic_top_k is not None else settings.VECTOR_TOP_K
         )
 
-        keyword_k = (
-            keyword_top_k
-            if keyword_top_k is not None
-            else settings.BM25_TOP_K
-        )
+        keyword_k = keyword_top_k if keyword_top_k is not None else settings.BM25_TOP_K
 
         if final_top_k <= 0:
-            raise ValueError(
-                "top_k must be greater than zero."
-            )
+            raise ValueError("top_k must be greater than zero.")
 
         if semantic_k <= 0:
-            raise ValueError(
-                "semantic_top_k must be greater than zero."
-            )
+            raise ValueError("semantic_top_k must be greater than zero.")
 
         if keyword_k <= 0:
-            raise ValueError(
-                "keyword_top_k must be greater than zero."
-            )
+            raise ValueError("keyword_top_k must be greater than zero.")
 
-        filter_mapping = (
-            self._filters_to_mapping(
-                filters
-            )
-        )
+        filter_mapping = self._filters_to_mapping(filters)
 
         logger.info(
-            "Starting hybrid search: "
-            "top_k=%d semantic_k=%d keyword_k=%d",
+            "Starting hybrid search: " "top_k=%d semantic_k=%d keyword_k=%d",
             final_top_k,
             semantic_k,
             keyword_k,
@@ -1606,12 +1275,10 @@ class HybridIndexer:
         # Semantic retrieval
         # ----------------------------------------------------
 
-        semantic_results = (
-            self.semantic_retriever.similarity_search(
-                query,
-                top_k=semantic_k,
-                filters=filters,
-            )
+        semantic_results = self.semantic_retriever.similarity_search(
+            query,
+            top_k=semantic_k,
+            filters=filters,
         )
 
         # ----------------------------------------------------
@@ -1647,8 +1314,7 @@ class HybridIndexer:
         )
 
         logger.info(
-            "Hybrid search completed: "
-            "semantic=%d keyword=%d final=%d",
+            "Hybrid search completed: " "semantic=%d keyword=%d final=%d",
             len(semantic_results),
             len(keyword_results),
             len(results),
@@ -1666,9 +1332,7 @@ class HybridIndexer:
     ) -> int:
         """Remove a document from the BM25 index."""
 
-        return self.bm25.delete_by_metadata(
-            document_id=document_id
-        )
+        return self.bm25.delete_by_metadata(document_id=document_id)
 
     def delete_by_candidate_id(
         self,
@@ -1676,9 +1340,7 @@ class HybridIndexer:
     ) -> int:
         """Remove candidate chunks from BM25."""
 
-        return self.bm25.delete_by_metadata(
-            candidate_id=candidate_id
-        )
+        return self.bm25.delete_by_metadata(candidate_id=candidate_id)
 
     def delete_by_jd_id(
         self,
@@ -1686,9 +1348,7 @@ class HybridIndexer:
     ) -> int:
         """Remove JD chunks from BM25."""
 
-        return self.bm25.delete_by_metadata(
-            jd_id=jd_id
-        )
+        return self.bm25.delete_by_metadata(jd_id=jd_id)
 
     # --------------------------------------------------------
     # Persistence
@@ -1706,7 +1366,6 @@ class HybridIndexer:
         """
 
         if path is None:
-
             directory = Path(
                 getattr(
                     settings,
@@ -1715,14 +1374,9 @@ class HybridIndexer:
                 )
             )
 
-            path = (
-                directory
-                / "bm25_index.json"
-            )
+            path = directory / "bm25_index.json"
 
-        self.bm25.save(
-            path
-        )
+        self.bm25.save(path)
 
     def load_bm25(
         self,
@@ -1731,7 +1385,6 @@ class HybridIndexer:
         """Load the persisted BM25 corpus."""
 
         if path is None:
-
             directory = Path(
                 getattr(
                     settings,
@@ -1740,14 +1393,9 @@ class HybridIndexer:
                 )
             )
 
-            path = (
-                directory
-                / "bm25_index.json"
-            )
+            path = directory / "bm25_index.json"
 
-        return self.bm25.load(
-            path
-        )
+        return self.bm25.load(path)
 
     # --------------------------------------------------------
     # Stats

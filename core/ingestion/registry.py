@@ -40,7 +40,9 @@ class DocumentRegistry:
             "document_id": document.document_id,
             "document_hash": document.document_hash,
             "source_file": document.source_file,
-            "document_type": getattr(document.document_type, "value", str(document.document_type)),
+            "document_type": getattr(
+                document.document_type, "value", str(document.document_type)
+            ),
             "candidate_id": document.candidate_id,
             "candidate_name": document.candidate_name,
             "indexed": True,

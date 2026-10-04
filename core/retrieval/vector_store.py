@@ -32,7 +32,6 @@ from utils.config import get_settings
 from utils.logger import get_logger
 from utils.schemas import RetrievalMethod, RetrievalResult
 
-
 logger = get_logger(__name__)
 settings = get_settings()
 
@@ -166,20 +165,12 @@ class GoogleEmbeddingProvider:
         dimension: int | None = None,
         api_key: str | None = None,
     ) -> None:
+        self.model_name = model_name or settings.EMBEDDING_MODEL
 
-        self.model_name = (
-            model_name
-            or settings.EMBEDDING_MODEL
-        )
-
-        self.dimension = (
-            dimension
-            or settings.EMBEDDING_DIMENSION
-        )
+        self.dimension = dimension or settings.EMBEDDING_DIMENSION
 
         self.api_key = (
-            api_key
-            or settings.GOOGLE_API_KEY.get_secret_value()
+            api_key or settings.GOOGLE_API_KEY.get_secret_value()
             if hasattr(settings.GOOGLE_API_KEY, "get_secret_value")
             else api_key or str(settings.GOOGLE_API_KEY)
         )
@@ -205,9 +196,7 @@ class GoogleEmbeddingProvider:
             return self._client
 
         if not self.api_key:
-            raise ValueError(
-                "GOOGLE_API_KEY is required for embeddings."
-            )
+            raise ValueError("GOOGLE_API_KEY is required for embeddings.")
 
         try:
             from google import genai
@@ -240,14 +229,10 @@ class GoogleEmbeddingProvider:
         )
 
         if embeddings is None:
-            raise RuntimeError(
-                "Embedding API returned no embeddings."
-            )
+            raise RuntimeError("Embedding API returned no embeddings.")
 
         if not embeddings:
-            raise RuntimeError(
-                "Embedding API returned an empty embedding list."
-            )
+            raise RuntimeError("Embedding API returned an empty embedding list.")
 
         first = embeddings[0]
 
@@ -261,14 +246,9 @@ class GoogleEmbeddingProvider:
             values = first.get("values")
 
         if not values:
-            raise RuntimeError(
-                "Embedding response does not contain vector values."
-            )
+            raise RuntimeError("Embedding response does not contain vector values.")
 
-        vector = [
-            float(value)
-            for value in values
-        ]
+        vector = [float(value) for value in values]
 
         self._validate_dimension(vector)
 
@@ -344,16 +324,12 @@ def _create_pinecone_client() -> Any:
         api_key = api_key.get_secret_value()
 
     if not api_key:
-        raise ValueError(
-            "PINECONE_API_KEY is required."
-        )
+        raise ValueError("PINECONE_API_KEY is required.")
 
     try:
         from pinecone import Pinecone
     except ImportError as exc:
-        raise RuntimeError(
-            "pinecone package is required."
-        ) from exc
+        raise RuntimeError("pinecone package is required.") from exc
 
     return Pinecone(
         api_key=api_key,
@@ -386,11 +362,7 @@ class PineconeVectorStore:
         index_name: str | None = None,
         namespace: str | None = None,
     ) -> None:
-
-        self.index_name = (
-            index_name
-            or settings.PINECONE_INDEX_NAME
-        )
+        self.index_name = index_name or settings.PINECONE_INDEX_NAME
         self.namespace = (
             namespace
             if namespace is not None
@@ -401,14 +373,9 @@ class PineconeVectorStore:
             )
         )
 
-        self.embedding_provider = (
-            embedding_provider
-            or GoogleEmbeddingProvider()
-        )
+        self.embedding_provider = embedding_provider or GoogleEmbeddingProvider()
 
-        self._pinecone_client = (
-            pinecone_client
-        )
+        self._pinecone_client = pinecone_client
 
         self._index = index
 
@@ -421,9 +388,7 @@ class PineconeVectorStore:
         """Return the lazily created Pinecone client."""
 
         if self._pinecone_client is None:
-            self._pinecone_client = (
-                _create_pinecone_client()
-            )
+            self._pinecone_client = _create_pinecone_client()
 
         return self._pinecone_client
 
@@ -432,11 +397,7 @@ class PineconeVectorStore:
         """Return the Pinecone index."""
 
         if self._index is None:
-            self._index = (
-                self.pinecone_client.Index(
-                    self.index_name
-                )
-            )
+            self._index = self.pinecone_client.Index(self.index_name)
 
         return self._index
 
@@ -451,9 +412,7 @@ class PineconeVectorStore:
         The index dimension must match the embedding dimension.
         """
 
-        existing_indexes = (
-            self.pinecone_client.list_indexes()
-        )
+        existing_indexes = self.pinecone_client.list_indexes()
 
         names: set[str] = set()
 
@@ -461,16 +420,13 @@ class PineconeVectorStore:
             existing_indexes,
             "names",
         ):
-            names = set(
-                existing_indexes.names()
-            )
+            names = set(existing_indexes.names())
 
         elif isinstance(
             existing_indexes,
             Iterable,
         ):
             for item in existing_indexes:
-
                 if isinstance(
                     item,
                     Mapping,
@@ -492,10 +448,11 @@ class PineconeVectorStore:
                 description = describe_index(self.index_name)
                 metric = self._get_value(description, "metric")
                 dimension = self._get_value(description, "dimension")
-                if metric and metric != "dotproduct":
+                if metric and metric != settings.PINECONE_METRIC:
                     raise RuntimeError(
                         f"Pinecone index {self.index_name!r} uses metric {metric!r}; "
-                        "single-index dense+sparse hybrid search requires dotproduct. "
+                        "single-index dense+sparse hybrid search requires "
+                        f"{settings.PINECONE_METRIC}. "
                         "Delete and recreate it with the updated configuration."
                     )
                 if dimension and int(dimension) != settings.PINECONE_DIMENSION:
@@ -507,9 +464,7 @@ class PineconeVectorStore:
             logger.info("Pinecone hybrid index already exists: %s", self.index_name)
             return
 
-        create_for_model = getattr(
-            self.pinecone_client, "create_index_for_model", None
-        )
+        create_for_model = getattr(self.pinecone_client, "create_index_for_model", None)
         if not callable(create_for_model):
             raise RuntimeError(
                 "The installed pinecone SDK must support create_index_for_model "
@@ -517,23 +472,24 @@ class PineconeVectorStore:
             )
         create_for_model(
             name=self.index_name,
-            cloud=getattr(settings, "PINECONE_CLOUD", "aws"),
-            region=getattr(settings, "PINECONE_REGION", "us-east-1"),
+            cloud=settings.PINECONE_CLOUD,
+            region=settings.PINECONE_REGION,
             embed={
                 "model": settings.PINECONE_DENSE_EMBEDDING_MODEL,
                 "field_map": {"text": "text"},
                 "dimension": settings.PINECONE_DIMENSION,
-                "metric": "dotproduct",
+                "metric": settings.PINECONE_METRIC,
                 "write_parameters": {"input_type": "passage"},
                 "read_parameters": {"input_type": "query"},
             },
         )
         logger.info(
             "Created Pinecone hybrid index: %s | dense=%s | sparse=%s "
-            "| metric=dotproduct | field_map=text:text",
+            "| metric=%s | field_map=text:text",
             self.index_name,
             settings.PINECONE_DENSE_EMBEDDING_MODEL,
             settings.PINECONE_SPARSE_EMBEDDING_MODEL,
+            settings.PINECONE_METRIC,
         )
         self._index = self.pinecone_client.Index(self.index_name)
 
@@ -545,7 +501,11 @@ class PineconeVectorStore:
         if hasattr(existing_indexes, "names"):
             return self.index_name in set(existing_indexes.names())
         for item in existing_indexes or []:
-            name = item.get("name") if isinstance(item, Mapping) else getattr(item, "name", None)
+            name = (
+                item.get("name")
+                if isinstance(item, Mapping)
+                else getattr(item, "name", None)
+            )
             if name == self.index_name:
                 return True
         return False
@@ -585,9 +545,7 @@ class PineconeVectorStore:
             ),
         ):
             return [
-                PineconeVectorStore._to_plain_value(
-                    item
-                )
+                PineconeVectorStore._to_plain_value(item)
                 for item in value
                 if item is not None
             ]
@@ -597,9 +555,7 @@ class PineconeVectorStore:
             Mapping,
         ):
             return {
-                str(key): PineconeVectorStore._to_plain_value(
-                    item
-                )
+                str(key): PineconeVectorStore._to_plain_value(item)
                 for key, item in value.items()
                 if item is not None
             }
@@ -625,13 +581,10 @@ class PineconeVectorStore:
         cleaned: dict[str, Any] = {}
 
         for key, value in metadata.items():
-
             if value is None:
                 continue
 
-            cleaned[str(key)] = (
-                cls._to_plain_value(value)
-            )
+            cleaned[str(key)] = cls._to_plain_value(value)
 
         return cleaned
 
@@ -645,7 +598,6 @@ class PineconeVectorStore:
         key: str,
         default: Any = None,
     ) -> Any:
-
         if isinstance(
             obj,
             Mapping,
@@ -736,13 +688,8 @@ class PineconeVectorStore:
 
         return VectorRecord(
             vector_id=str(vector_id),
-            values=[
-                float(value)
-                for value in vector
-            ],
-            metadata=cls._clean_metadata(
-                metadata
-            ),
+            values=[float(value) for value in vector],
+            metadata=cls._clean_metadata(metadata),
             sparse_values={
                 "indices": list(sparse_vector.get("indices", [])),
                 "values": [float(value) for value in sparse_vector.get("values", [])],
@@ -790,7 +737,9 @@ class PineconeVectorStore:
             dense_items = self._get_value(dense_response, "data", []) or []
             sparse_items = self._get_value(sparse_response, "data", []) or []
             if len(dense_items) != len(batch) or len(sparse_items) != len(batch):
-                raise RuntimeError("Pinecone embedding count does not match input count.")
+                raise RuntimeError(
+                    "Pinecone embedding count does not match input count."
+                )
 
             for dense, sparse in zip(dense_items, sparse_items):
                 dense_values = self._get_value(dense, "values", []) or []
@@ -837,7 +786,6 @@ class PineconeVectorStore:
         texts = []
 
         for chunk in chunks:
-
             text = (
                 self._get_value(
                     chunk,
@@ -855,9 +803,7 @@ class PineconeVectorStore:
             )
 
             if not text.strip():
-                raise ValueError(
-                    "Cannot index an empty chunk."
-                )
+                raise ValueError("Cannot index an empty chunk.")
 
             texts.append(text)
 
@@ -872,9 +818,7 @@ class PineconeVectorStore:
         embeddings = self._embed_hybrid_texts(texts, input_type="passage")
 
         if len(embeddings) != len(chunks):
-            raise RuntimeError(
-                "Embedding count does not match chunk count."
-            )
+            raise RuntimeError("Embedding count does not match chunk count.")
 
         records = [
             self._chunk_to_record(
@@ -895,9 +839,7 @@ class PineconeVectorStore:
             len(records),
             batch_size,
         ):
-            batch = records[
-                start : start + batch_size
-            ]
+            batch = records[start : start + batch_size]
 
             payload = [
                 {
@@ -923,7 +865,9 @@ class PineconeVectorStore:
                     f"expected={len(batch)} acknowledged={acknowledged}."
                 )
 
-            total_upserted += int(acknowledged) if acknowledged is not None else len(batch)
+            total_upserted += (
+                int(acknowledged) if acknowledged is not None else len(batch)
+            )
 
             logger.debug(
                 "Upserted Pinecone batch: %d vectors.",
@@ -961,9 +905,7 @@ class PineconeVectorStore:
             filters,
             "model_dump",
         ):
-            raw = filters.model_dump(
-                exclude_none=True
-            )
+            raw = filters.model_dump(exclude_none=True)
         elif isinstance(
             filters,
             Mapping,
@@ -971,11 +913,7 @@ class PineconeVectorStore:
             raw = dict(filters)
         else:
             raw = {
-                key: value
-                for key, value in vars(
-                    filters
-                ).items()
-                if value is not None
+                key: value for key, value in vars(filters).items() if value is not None
             }
 
         pinecone_filter: dict[str, Any] = {}
@@ -989,7 +927,6 @@ class PineconeVectorStore:
         )
 
         for field in direct_fields:
-
             value = raw.get(field)
 
             if value is None:
@@ -1003,9 +940,7 @@ class PineconeVectorStore:
                 # empty $in constraint makes Pinecone reject every record.
                 if not value:
                     continue
-                pinecone_filter[field] = {
-                    "$in": list(value)
-                }
+                pinecone_filter[field] = {"$in": list(value)}
             else:
                 if hasattr(
                     value,
@@ -1015,61 +950,34 @@ class PineconeVectorStore:
 
                 pinecone_filter[field] = value
 
-        candidate_ids = raw.get(
-            "candidate_ids"
-        )
+        candidate_ids = raw.get("candidate_ids")
 
         if candidate_ids:
-            pinecone_filter[
-                "candidate_id"
-            ] = {
-                "$in": list(candidate_ids)
-            }
+            pinecone_filter["candidate_id"] = {"$in": list(candidate_ids)}
 
         skills = raw.get("skills")
 
         if skills:
-            pinecone_filter[
-                "skills"
-            ] = {
-                "$in": list(skills)
-            }
+            pinecone_filter["skills"] = {"$in": list(skills)}
 
-        min_experience = raw.get(
-            "min_experience"
-        )
+        min_experience = raw.get("min_experience")
 
         if min_experience is not None:
-            pinecone_filter[
-                "experience_years"
-            ] = {
-                "$gte": min_experience
-            }
+            pinecone_filter["experience_years"] = {"$gte": min_experience}
 
-        max_experience = raw.get(
-            "max_experience"
-        )
+        max_experience = raw.get("max_experience")
 
         if max_experience is not None:
-
             existing = pinecone_filter.get(
                 "experience_years",
                 {},
             )
 
-            existing[
-                "$lte"
-            ] = max_experience
+            existing["$lte"] = max_experience
 
-            pinecone_filter[
-                "experience_years"
-            ] = existing
+            pinecone_filter["experience_years"] = existing
 
-        return (
-            pinecone_filter
-            if pinecone_filter
-            else None
-        )
+        return pinecone_filter if pinecone_filter else None
 
     def _parse_matches(
         self,
@@ -1094,29 +1002,19 @@ class PineconeVectorStore:
 
         matches = matches or []
 
-        results: list[
-            VectorSearchMatch
-        ] = []
+        results: list[VectorSearchMatch] = []
 
         for match in matches:
-
             if isinstance(
                 match,
                 Mapping,
             ):
-                vector_id = match.get(
-                    "id"
-                )
+                vector_id = match.get("id")
                 score = match.get(
                     "score",
                     0.0,
                 )
-                metadata = (
-                    match.get(
-                        "metadata"
-                    )
-                    or {}
-                )
+                metadata = match.get("metadata") or {}
 
             else:
                 vector_id = getattr(
@@ -1143,15 +1041,9 @@ class PineconeVectorStore:
 
             results.append(
                 VectorSearchMatch(
-                    vector_id=str(
-                        vector_id
-                    ),
-                    score=float(
-                        score or 0.0
-                    ),
-                    metadata=dict(
-                        metadata
-                    ),
+                    vector_id=str(vector_id),
+                    score=float(score or 0.0),
+                    metadata=dict(metadata),
                 )
             )
 
@@ -1174,33 +1066,16 @@ class PineconeVectorStore:
         the schema definition here.
         """
 
-        metadata = dict(
-            match.metadata
-        )
+        metadata = dict(match.metadata)
 
         payload: dict[str, Any] = {
-            "chunk_id": (
-                metadata.get(
-                    "chunk_id"
-                )
-                or match.vector_id
-            ),
+            "chunk_id": (metadata.get("chunk_id") or match.vector_id),
             "document_id": metadata.get("document_id") or match.vector_id,
             "document_type": metadata.get("document_type", "resume"),
-            "candidate_id": metadata.get(
-                "candidate_id"
-            ),
+            "candidate_id": metadata.get("candidate_id"),
             "candidate_name": metadata.get("candidate_name"),
             "section": metadata.get("section"),
-            "text": (
-                metadata.get(
-                    "text"
-                )
-                or metadata.get(
-                    "content"
-                )
-                or ""
-            ),
+            "text": (metadata.get("text") or metadata.get("content") or ""),
             "source_file": metadata.get("source_file") or metadata.get("source"),
             "page_number": metadata.get("page_number") or metadata.get("page"),
             "retrieval_method": RetrievalMethod.DENSE,
@@ -1215,14 +1090,10 @@ class PineconeVectorStore:
             RetrievalResult,
             "model_validate",
         ):
-            return RetrievalResult.model_validate(
-                payload
-            )
+            return RetrievalResult.model_validate(payload)
 
         # Defensive compatibility for Pydantic v1.
-        return RetrievalResult.parse_obj(
-            payload
-        )
+        return RetrievalResult.parse_obj(payload)
 
     # --------------------------------------------------------
     # Semantic Search
@@ -1246,20 +1117,17 @@ class PineconeVectorStore:
         if not query or not query.strip():
             return []
 
-        k = (
-            top_k
-            if top_k is not None
-            else settings.VECTOR_TOP_K
-        )
+        k = top_k if top_k is not None else settings.VECTOR_TOP_K
 
         if k <= 0:
-            raise ValueError(
-                "top_k must be greater than zero."
-            )
+            raise ValueError("top_k must be greater than zero.")
 
         # Searching must not create an empty index; ingestion creates it on demand.
         if not self.index_exists():
-            logger.info("Pinecone index is not created yet; skipping search | index=%s", self.index_name)
+            logger.info(
+                "Pinecone index is not created yet; skipping search | index=%s",
+                self.index_name,
+            )
             return []
 
         query_chunks = RecursiveCharacterTextSplitter(
@@ -1271,14 +1139,11 @@ class PineconeVectorStore:
             return []
 
         query_vectors = [
-            dense for dense, _ in self._embed_hybrid_texts(query_chunks, input_type="query")
+            dense
+            for dense, _ in self._embed_hybrid_texts(query_chunks, input_type="query")
         ]
 
-        pinecone_filter = (
-            self._build_filter(
-                filters
-            )
-        )
+        pinecone_filter = self._build_filter(filters)
 
         best_matches: dict[str, VectorSearchMatch] = {}
         for chunk_number, vector in enumerate(query_vectors, start=1):
@@ -1311,9 +1176,7 @@ class PineconeVectorStore:
         )[:k]
 
         results = [
-            self._build_retrieval_result(
-                match
-            ).model_copy(update={"rank": rank})
+            self._build_retrieval_result(match).model_copy(update={"rank": rank})
             for rank, match in enumerate(matches, start=1)
         ]
 
@@ -1340,7 +1203,10 @@ class PineconeVectorStore:
         if k <= 0:
             raise ValueError("top_k must be greater than zero.")
         if not self.index_exists():
-            logger.info("Pinecone index is not created yet; skipping sparse search | index=%s", self.index_name)
+            logger.info(
+                "Pinecone index is not created yet; skipping sparse search | index=%s",
+                self.index_name,
+            )
             return []
         sparse = self._embed_hybrid_texts([query.strip()], input_type="query")[0][1]
         response = self.index.query(
@@ -1357,8 +1223,12 @@ class PineconeVectorStore:
             include_metadata=True,
             include_values=False,
         )
-        return [self._build_retrieval_result(match).model_copy(update={"retrieval_method": RetrievalMethod.SPARSE, "rank": rank})
-                for rank, match in enumerate(self._parse_matches(response), start=1)]
+        return [
+            self._build_retrieval_result(match).model_copy(
+                update={"retrieval_method": RetrievalMethod.SPARSE, "rank": rank}
+            )
+            for rank, match in enumerate(self._parse_matches(response), start=1)
+        ]
 
     # --------------------------------------------------------
     # Deletion
@@ -1393,9 +1263,7 @@ class PineconeVectorStore:
             return
 
         self.index.delete(
-            filter={
-                "document_id": document_id
-            },
+            filter={"document_id": document_id},
             namespace=self.namespace,
         )
 
@@ -1414,9 +1282,7 @@ class PineconeVectorStore:
             return
 
         self.index.delete(
-            filter={
-                "candidate_id": candidate_id
-            },
+            filter={"candidate_id": candidate_id},
             namespace=self.namespace,
         )
 
@@ -1435,9 +1301,7 @@ class PineconeVectorStore:
             return
 
         self.index.delete(
-            filter={
-                "jd_id": jd_id
-            },
+            filter={"jd_id": jd_id},
             namespace=self.namespace,
         )
 

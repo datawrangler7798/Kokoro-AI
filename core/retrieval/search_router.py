@@ -34,20 +34,13 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Protocol, Sequence
 
 from utils.config import get_settings
 from utils.logger import get_logger
+from utils.multi_query import get_queries_for_retrieval
+from utils.schemas import QueryIntent, QueryPlan, SearchDepth
 from utils.utils import get_llm_rate_limiter
-from utils.multi_query import (
-    get_queries_for_retrieval,
-)
-from utils.schemas import (
-    QueryIntent,
-    QueryPlan,
-    SearchDepth,
-)
-
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -92,13 +85,9 @@ class RouteDecision:
 
     requires_multi_query: bool
 
-    constraints: list[str] = field(
-        default_factory=list
-    )
+    constraints: list[str] = field(default_factory=list)
 
-    sub_queries: list[str] = field(
-        default_factory=list
-    )
+    sub_queries: list[str] = field(default_factory=list)
 
     reasoning: str = ""
 
@@ -162,32 +151,22 @@ Rules:
         generator: Callable[
             [str],
             str,
-        ] | None = None,
+        ]
+        | None = None,
         model_name: str | None = None,
         api_key: str | None = None,
     ) -> None:
+        self.model_name = model_name or settings.LLM_MODEL
 
-        self.model_name = (
-            model_name
-            or settings.LLM_MODEL
-        )
-
-        configured_key = (
-            settings.GOOGLE_API_KEY
-        )
+        configured_key = settings.GOOGLE_API_KEY
 
         if hasattr(
             configured_key,
             "get_secret_value",
         ):
-            configured_key = (
-                configured_key.get_secret_value()
-            )
+            configured_key = configured_key.get_secret_value()
 
-        self.api_key = (
-            api_key
-            or configured_key
-        )
+        self.api_key = api_key or configured_key
 
         self._generator = generator
 
@@ -199,22 +178,15 @@ Rules:
         self,
         prompt: str,
     ) -> str:
-
         if not self.api_key:
-            raise ValueError(
-                "GOOGLE_API_KEY is required for query analysis."
-            )
+            raise ValueError("GOOGLE_API_KEY is required for query analysis.")
 
         try:
             from google import genai
         except ImportError as exc:
-            raise RuntimeError(
-                "google-genai is required for query analysis."
-            ) from exc
+            raise RuntimeError("google-genai is required for query analysis.") from exc
 
-        client = genai.Client(
-            api_key=self.api_key
-        )
+        client = genai.Client(api_key=self.api_key)
 
         get_llm_rate_limiter().acquire()
         response = client.models.generate_content(
@@ -229,9 +201,7 @@ Rules:
         )
 
         if not text:
-            raise RuntimeError(
-                "Query analyzer returned an empty response."
-            )
+            raise RuntimeError("Query analyzer returned an empty response.")
 
         return text
 
@@ -239,15 +209,10 @@ Rules:
         self,
         prompt: str,
     ) -> str:
-
         if self._generator is not None:
-            return self._generator(
-                prompt
-            )
+            return self._generator(prompt)
 
-        return self._generate_with_gemini(
-            prompt
-        )
+        return self._generate_with_gemini(prompt)
 
     # --------------------------------------------------------
     # Prompt
@@ -259,11 +224,7 @@ Rules:
         *,
         conversation_context: str | None = None,
     ) -> str:
-
-        context = (
-            conversation_context
-            or "No previous conversation context."
-        )
+        context = conversation_context or "No previous conversation context."
 
         return f"""
 {self.SYSTEM_INSTRUCTION}
@@ -300,15 +261,9 @@ Do not include markdown.
     def _extract_json(
         text: str,
     ) -> dict[str, Any]:
+        cleaned = text.strip()
 
-        cleaned = (
-            text
-            .strip()
-        )
-
-        if cleaned.startswith(
-            "```"
-        ):
+        if cleaned.startswith("```"):
             cleaned = re.sub(
                 r"^```(?:json)?",
                 "",
@@ -323,22 +278,17 @@ Do not include markdown.
             ).strip()
 
         try:
-            payload = json.loads(
-                cleaned
-            )
+            payload = json.loads(cleaned)
 
             if not isinstance(
                 payload,
                 dict,
             ):
-                raise ValueError(
-                    "Analyzer JSON must be an object."
-                )
+                raise ValueError("Analyzer JSON must be an object.")
 
             return payload
 
         except json.JSONDecodeError:
-
             match = re.search(
                 r"\{.*\}",
                 cleaned,
@@ -346,21 +296,15 @@ Do not include markdown.
             )
 
             if not match:
-                raise ValueError(
-                    "Could not parse query analyzer JSON."
-                )
+                raise ValueError("Could not parse query analyzer JSON.")
 
-            payload = json.loads(
-                match.group(0)
-            )
+            payload = json.loads(match.group(0))
 
             if not isinstance(
                 payload,
                 dict,
             ):
-                raise ValueError(
-                    "Analyzer JSON must be an object."
-                )
+                raise ValueError("Analyzer JSON must be an object.")
 
             return payload
 
@@ -372,56 +316,29 @@ Do not include markdown.
     def _parse_intent(
         value: Any,
     ) -> QueryIntent:
-
         if isinstance(
             value,
             QueryIntent,
         ):
             return value
 
-        normalized = str(
-            value or ""
-        ).strip().lower()
+        normalized = str(value or "").strip().lower()
 
         aliases = {
-            "candidate_search": (
-                QueryIntent.SEARCH
-            ),
-            "candidate search": (
-                QueryIntent.SEARCH
-            ),
+            "candidate_search": (QueryIntent.SEARCH),
+            "candidate search": (QueryIntent.SEARCH),
             "search": QueryIntent.SEARCH,
             "filter": QueryIntent.FILTER,
-            "comparison": (
-                QueryIntent.COMPARISON
-            ),
-            "compare": (
-                QueryIntent.COMPARISON
-            ),
-            "jd_gap_analysis": (
-                QueryIntent.JD_GAP_ANALYSIS
-            ),
-            "jd gap analysis": (
-                QueryIntent.JD_GAP_ANALYSIS
-            ),
-            "skill_match": (
-                QueryIntent.SKILL_MATCH
-            ),
-            "skill match": (
-                QueryIntent.SKILL_MATCH
-            ),
-            "experience_match": (
-                QueryIntent.EXPERIENCE_MATCH
-            ),
-            "experience match": (
-                QueryIntent.EXPERIENCE_MATCH
-            ),
-            "candidate_details": (
-                QueryIntent.CANDIDATE_DETAILS
-            ),
-            "candidate details": (
-                QueryIntent.CANDIDATE_DETAILS
-            ),
+            "comparison": (QueryIntent.COMPARISON),
+            "compare": (QueryIntent.COMPARISON),
+            "jd_gap_analysis": (QueryIntent.JD_GAP_ANALYSIS),
+            "jd gap analysis": (QueryIntent.JD_GAP_ANALYSIS),
+            "skill_match": (QueryIntent.SKILL_MATCH),
+            "skill match": (QueryIntent.SKILL_MATCH),
+            "experience_match": (QueryIntent.EXPERIENCE_MATCH),
+            "experience match": (QueryIntent.EXPERIENCE_MATCH),
+            "candidate_details": (QueryIntent.CANDIDATE_DETAILS),
+            "candidate details": (QueryIntent.CANDIDATE_DETAILS),
             "general": QueryIntent.GENERAL,
         }
 
@@ -434,16 +351,13 @@ Do not include markdown.
     def _parse_depth(
         value: Any,
     ) -> SearchDepth:
-
         if isinstance(
             value,
             SearchDepth,
         ):
             return value
 
-        normalized = str(
-            value or ""
-        ).strip().lower()
+        normalized = str(value or "").strip().lower()
 
         if normalized == "deep":
             return SearchDepth.DEEP
@@ -460,11 +374,8 @@ Do not include markdown.
         *,
         conversation_context: str | None = None,
     ) -> RouteDecision:
-
         if not query or not query.strip():
-            raise ValueError(
-                "Query cannot be empty."
-            )
+            raise ValueError("Query cannot be empty.")
 
         prompt = self._build_prompt(
             query.strip(),
@@ -476,9 +387,7 @@ Do not include markdown.
             prompt,
         )
 
-        raw_response = self._generate(
-            prompt
-        )
+        raw_response = self._generate(prompt)
 
         logger.debug(
             "Query analyzer response:\n%s",
@@ -486,15 +395,10 @@ Do not include markdown.
         )
 
         try:
-            payload = self._extract_json(
-                raw_response
-            )
+            payload = self._extract_json(raw_response)
 
         except Exception:
-
-            logger.exception(
-                "Failed to parse query analyzer response."
-            )
+            logger.exception("Failed to parse query analyzer response.")
 
             # Safe fallback:
             # simple search, no decomposition.
@@ -509,17 +413,9 @@ Do not include markdown.
                 ),
             )
 
-        intent = self._parse_intent(
-            payload.get(
-                "intent"
-            )
-        )
+        intent = self._parse_intent(payload.get("intent"))
 
-        depth = self._parse_depth(
-            payload.get(
-                "search_depth"
-            )
-        )
+        depth = self._parse_depth(payload.get("search_depth"))
 
         sub_queries = (
             payload.get(
@@ -530,9 +426,7 @@ Do not include markdown.
         )
 
         sub_queries = [
-            str(query).strip()
-            for query in sub_queries
-            if str(query).strip()
+            str(query).strip() for query in sub_queries if str(query).strip()
         ]
 
         constraints = (
@@ -544,9 +438,7 @@ Do not include markdown.
         )
 
         constraints = [
-            str(value).strip()
-            for value in constraints
-            if str(value).strip()
+            str(value).strip() for value in constraints if str(value).strip()
         ]
 
         requires_decomposition = bool(
@@ -586,12 +478,8 @@ Do not include markdown.
         return RouteDecision(
             intent=intent,
             search_depth=depth,
-            requires_decomposition=(
-                requires_decomposition
-            ),
-            requires_multi_query=(
-                requires_multi_query
-            ),
+            requires_decomposition=(requires_decomposition),
+            requires_multi_query=(requires_multi_query),
             constraints=constraints,
             sub_queries=sub_queries,
             reasoning=reasoning,
@@ -655,12 +543,7 @@ class QuerySignalDetector:
         query: str,
         patterns: Sequence[str],
     ) -> bool:
-
-        normalized = (
-            query
-            .strip()
-            .lower()
-        )
+        normalized = query.strip().lower()
 
         return any(
             re.search(
@@ -674,7 +557,6 @@ class QuerySignalDetector:
         self,
         query: str,
     ) -> bool:
-
         return self._matches(
             query,
             self.COMPARISON_PATTERNS,
@@ -684,7 +566,6 @@ class QuerySignalDetector:
         self,
         query: str,
     ) -> bool:
-
         return self._matches(
             query,
             self.JD_GAP_PATTERNS,
@@ -694,7 +575,6 @@ class QuerySignalDetector:
         self,
         query: str,
     ) -> bool:
-
         return self._matches(
             query,
             self.MULTI_PART_PATTERNS,
@@ -704,7 +584,6 @@ class QuerySignalDetector:
         self,
         query: str,
     ) -> bool:
-
         return self._matches(
             query,
             self.FILTER_PATTERNS,
@@ -724,24 +603,16 @@ class QuerySignalDetector:
 
         score = 0
 
-        if self.is_comparison(
-            query
-        ):
+        if self.is_comparison(query):
             score += 2
 
-        if self.is_jd_gap_analysis(
-            query
-        ):
+        if self.is_jd_gap_analysis(query):
             score += 2
 
-        if self.is_multi_part(
-            query
-        ):
+        if self.is_multi_part(query):
             score += 2
 
-        if self.has_filters(
-            query
-        ):
+        if self.has_filters(query):
             score += 1
 
         # Multiple conjunctions often indicate multiple
@@ -786,16 +657,9 @@ class SearchRouter:
         max_sub_queries: int | None = None,
         max_expanded_queries: int | None = None,
     ) -> None:
+        self.analyzer = analyzer or GeminiQueryAnalyzer()
 
-        self.analyzer = (
-            analyzer
-            or GeminiQueryAnalyzer()
-        )
-
-        self.signal_detector = (
-            signal_detector
-            or QuerySignalDetector()
-        )
+        self.signal_detector = signal_detector or QuerySignalDetector()
 
         self.max_sub_queries = (
             max_sub_queries
@@ -825,7 +689,6 @@ class SearchRouter:
     def _clean_query(
         query: str,
     ) -> str:
-
         return re.sub(
             r"\s+",
             " ",
@@ -840,13 +703,11 @@ class SearchRouter:
     def _deduplicate(
         queries: Sequence[str],
     ) -> list[str]:
-
         result: list[str] = []
 
         seen: set[str] = set()
 
         for query in queries:
-
             cleaned = re.sub(
                 r"\s+",
                 " ",
@@ -862,9 +723,7 @@ class SearchRouter:
                 continue
 
             seen.add(key)
-            result.append(
-                cleaned
-            )
+            result.append(cleaned)
 
         return result
 
@@ -877,46 +736,24 @@ class SearchRouter:
         query: str,
         decision: RouteDecision,
     ) -> RouteDecision:
+        if self.signal_detector.is_comparison(query):
+            decision.intent = QueryIntent.COMPARISON
+            decision.search_depth = SearchDepth.DEEP
 
-        if self.signal_detector.is_comparison(
-            query
-        ):
-            decision.intent = (
-                QueryIntent.COMPARISON
-            )
-            decision.search_depth = (
-                SearchDepth.DEEP
-            )
+        elif self.signal_detector.is_jd_gap_analysis(query):
+            decision.intent = QueryIntent.JD_GAP_ANALYSIS
+            decision.search_depth = SearchDepth.DEEP
 
-        elif self.signal_detector.is_jd_gap_analysis(
-            query
-        ):
-            decision.intent = (
-                QueryIntent.JD_GAP_ANALYSIS
-            )
-            decision.search_depth = (
-                SearchDepth.DEEP
-            )
-
-        complexity = (
-            self.signal_detector.complexity_score(
-                query
-            )
-        )
+        complexity = self.signal_detector.complexity_score(query)
 
         if complexity >= 3:
-            decision.search_depth = (
-                SearchDepth.DEEP
-            )
+            decision.search_depth = SearchDepth.DEEP
 
         if decision.search_depth == SearchDepth.DEEP:
-            decision.requires_multi_query = (
-                decision.requires_multi_query
-                or getattr(
-                    settings,
-                    "ENABLE_MULTI_QUERY",
-                    True,
-                )
+            decision.requires_multi_query = decision.requires_multi_query or getattr(
+                settings,
+                "ENABLE_MULTI_QUERY",
+                True,
             )
 
         return decision
@@ -948,7 +785,6 @@ class SearchRouter:
         )
 
         if len(parts) == 1:
-
             # Split only on strong multi-part patterns.
             parts = re.split(
                 r"\s+(?:and then|then identify|then show|also identify)\s+",
@@ -956,16 +792,12 @@ class SearchRouter:
                 flags=re.IGNORECASE,
             )
 
-        parts = self._deduplicate(
-            parts
-        )
+        parts = self._deduplicate(parts)
 
         if len(parts) <= 1:
             return []
 
-        return parts[
-            : self.max_sub_queries
-        ]
+        return parts[: self.max_sub_queries]
 
     # --------------------------------------------------------
     # Multi Query
@@ -975,28 +807,18 @@ class SearchRouter:
         self,
         queries: Sequence[str],
     ) -> list[str]:
-
         all_queries: list[str] = []
 
         for query in queries:
-
-            expanded = (
-                get_queries_for_retrieval(
-                    query=query,
-                    enable_multi_query=True,
-                    max_queries=(
-                        self.max_expanded_queries
-                    ),
-                )
+            expanded = get_queries_for_retrieval(
+                query=query,
+                enable_multi_query=True,
+                max_queries=(self.max_expanded_queries),
             )
 
-            all_queries.extend(
-                expanded
-            )
+            all_queries.extend(expanded)
 
-        return self._deduplicate(
-            all_queries
-        )
+        return self._deduplicate(all_queries)
 
     # --------------------------------------------------------
     # QueryPlan Construction
@@ -1024,18 +846,10 @@ class SearchRouter:
             "query": query,
             "intent": decision.intent,
             "search_depth": decision.search_depth,
-            "requires_decomposition": (
-                decision.requires_decomposition
-            ),
-            "requires_multi_query": (
-                decision.requires_multi_query
-            ),
-            "sub_queries": list(
-                decision.sub_queries
-            ),
-            "expanded_queries": list(
-                expanded_queries
-            ),
+            "requires_decomposition": (decision.requires_decomposition),
+            "requires_multi_query": (decision.requires_multi_query),
+            "sub_queries": list(decision.sub_queries),
+            "expanded_queries": list(expanded_queries),
             "top_k": (
                 top_k
                 if top_k is not None
@@ -1054,13 +868,9 @@ class SearchRouter:
             "model_validate",
         ):
             try:
-                return QueryPlan.model_validate(
-                    payload
-                )
+                return QueryPlan.model_validate(payload)
             except Exception:
-                logger.exception(
-                    "QueryPlan validation failed."
-                )
+                logger.exception("QueryPlan validation failed.")
 
         # Compatibility fallback.
         return payload
@@ -1095,18 +905,12 @@ class SearchRouter:
             retrieval queries
         """
 
-        query = self._clean_query(
-            query
-        )
+        query = self._clean_query(query)
 
         if not query:
-            raise ValueError(
-                "Query cannot be empty."
-            )
+            raise ValueError("Query cannot be empty.")
 
-        logger.info(
-            "Routing recruiter query."
-        )
+        logger.info("Routing recruiter query.")
 
         # ----------------------------------------------------
         # Analyze
@@ -1114,48 +918,32 @@ class SearchRouter:
 
         decision = self.analyzer.analyze(
             query,
-            conversation_context=(
-                conversation_context
-            ),
+            conversation_context=(conversation_context),
         )
 
-        decision = (
-            self._apply_signal_overrides(
-                query,
-                decision,
-            )
+        decision = self._apply_signal_overrides(
+            query,
+            decision,
         )
 
         # ----------------------------------------------------
         # Shallow search
         # ----------------------------------------------------
 
-        if (
-            decision.search_depth
-            == SearchDepth.SHALLOW
-        ):
+        if decision.search_depth == SearchDepth.SHALLOW:
+            decision.requires_decomposition = False
 
-            decision.requires_decomposition = (
-                False
-            )
-
-            decision.requires_multi_query = (
-                False
-            )
+            decision.requires_multi_query = False
 
             decision.sub_queries = []
 
-            expanded_queries = [
-                query
-            ]
+            expanded_queries = [query]
 
             return self._build_query_plan(
                 query,
                 decision,
                 expanded_queries,
-                conversation_context=(
-                    conversation_context
-                ),
+                conversation_context=(conversation_context),
                 filters=filters,
                 top_k=top_k,
             )
@@ -1164,95 +952,57 @@ class SearchRouter:
         # Deep search
         # ----------------------------------------------------
 
-        sub_queries = (
-            self._deduplicate(
-                decision.sub_queries
-            )
-        )
+        sub_queries = self._deduplicate(decision.sub_queries)
 
         # If the LLM did not produce usable
         # decomposition, use a conservative fallback.
-        if (
-            decision.requires_decomposition
-            and len(sub_queries) <= 1
-        ):
-
-            fallback_queries = (
-                self._rule_based_decomposition(
-                    query
-                )
-            )
+        if decision.requires_decomposition and len(sub_queries) <= 1:
+            fallback_queries = self._rule_based_decomposition(query)
 
             if fallback_queries:
-                sub_queries = (
-                    fallback_queries
-                )
+                sub_queries = fallback_queries
 
         # If decomposition is not required but the
         # query is deep, use the original query as
         # the retrieval intent.
         if not sub_queries:
-            sub_queries = [
-                query
-            ]
+            sub_queries = [query]
 
-        sub_queries = sub_queries[
-            : self.max_sub_queries
-        ]
+        sub_queries = sub_queries[: self.max_sub_queries]
 
-        decision.sub_queries = (
-            sub_queries
-        )
+        decision.sub_queries = sub_queries
 
         # ----------------------------------------------------
         # Multi-query expansion
         # ----------------------------------------------------
 
-        if (
-            decision.requires_multi_query
-            and getattr(
-                settings,
-                "ENABLE_MULTI_QUERY",
-                True,
-            )
+        if decision.requires_multi_query and getattr(
+            settings,
+            "ENABLE_MULTI_QUERY",
+            True,
         ):
-
             try:
-                expanded_queries = (
-                    self._expand_queries(
-                        sub_queries
-                    )
-                )
+                expanded_queries = self._expand_queries(sub_queries)
 
             except Exception:
-
                 logger.exception(
-                    "Multi-query expansion failed; "
-                    "falling back to sub-queries."
+                    "Multi-query expansion failed; " "falling back to sub-queries."
                 )
 
-                expanded_queries = list(
-                    sub_queries
-                )
+                expanded_queries = list(sub_queries)
 
         else:
-            expanded_queries = list(
-                sub_queries
-            )
+            expanded_queries = list(sub_queries)
 
         if not expanded_queries:
-            expanded_queries = list(
-                sub_queries
-            )
+            expanded_queries = list(sub_queries)
 
         # Always retain the original query.
-        expanded_queries = (
-            self._deduplicate(
-                [
-                    query,
-                    *expanded_queries,
-                ]
-            )
+        expanded_queries = self._deduplicate(
+            [
+                query,
+                *expanded_queries,
+            ]
         )
 
         logger.info(
@@ -1270,9 +1020,7 @@ class SearchRouter:
             query,
             decision,
             expanded_queries,
-            conversation_context=(
-                conversation_context
-            ),
+            conversation_context=(conversation_context),
             filters=filters,
             top_k=top_k,
         )
@@ -1289,9 +1037,7 @@ def create_search_router(
 ) -> SearchRouter:
     """Create a configured search router."""
 
-    return SearchRouter(
-        analyzer=analyzer
-    )
+    return SearchRouter(analyzer=analyzer)
 
 
 def route_query(
@@ -1306,16 +1052,11 @@ def route_query(
     Convenience wrapper for query routing.
     """
 
-    active_router = (
-        router
-        or create_search_router()
-    )
+    active_router = router or create_search_router()
 
     return active_router.route(
         query,
-        conversation_context=(
-            conversation_context
-        ),
+        conversation_context=(conversation_context),
         filters=filters,
         top_k=top_k,
     )

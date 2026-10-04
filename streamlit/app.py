@@ -15,12 +15,13 @@ interfaces and should not contain retrieval or LLM business logic.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 # ============================================================
 # PROJECT ROOT / IMPORT PATH
 # ============================================================
 
-import sys
-from pathlib import Path
 
 # app.py is inside:
 # Kokoro-AI/streamlit/app.py
@@ -43,8 +44,8 @@ if str(PROJECT_ROOT) not in sys.path:
 # IMPORTS
 # ============================================================
 
-import json
 import importlib.util
+import json
 import re
 import threading
 import time
@@ -53,13 +54,11 @@ from html import escape
 from typing import Any
 
 import streamlit as st
-
 from core.application import create_application
 from core.evaluation.evaluator import create_evaluator
 from utils.config import get_settings
 from utils.logger import logger
 from utils.schemas import DocumentType, SearchFilters
-
 
 # ============================================================
 # Configuration
@@ -74,6 +73,7 @@ WELCOME_MESSAGE = (
     "Hi, I’m Kira, the recruiting assistant for Kokoro AI. "
     "Tell me what kind of candidate you’re looking for, and I’ll search the resume library."
 )
+
 
 def welcome_messages() -> list[dict[str, str]]:
     return [{"role": "assistant", "content": WELCOME_MESSAGE}]
@@ -121,9 +121,7 @@ def looks_like_job_description(message: str) -> bool:
         "what you will do",
         "qualifications",
     )
-    return (
-        len(message.strip()) >= 500
-    ) or (
+    return (len(message.strip()) >= 500) or (
         len(message.strip()) >= 180
         and any(heading in normalized for heading in jd_headings)
     )
@@ -168,7 +166,9 @@ def candidate_resume_paths(candidate: dict[str, Any]) -> list[Path]:
             source_names = [
                 path.name
                 for path in resume_root.glob("*.pdf")
-                if re.sub(r"[^a-z0-9]", "", path.stem.lower()).startswith(candidate_token)
+                if re.sub(r"[^a-z0-9]", "", path.stem.lower()).startswith(
+                    candidate_token
+                )
             ]
 
     paths: list[Path] = []
@@ -270,13 +270,17 @@ def initialize_session() -> None:
 
     # Normalize older IDs so visible sessions use the KK##### format.
     current_id = st.session_state.session_id
-    all_ids = list(dict.fromkeys([
-        *st.session_state.recent_sessions,
-        *st.session_state.session_messages.keys(),
-        *st.session_state.session_job_descriptions.keys(),
-        *st.session_state.ended_sessions,
-        current_id,
-    ]))
+    all_ids = list(
+        dict.fromkeys(
+            [
+                *st.session_state.recent_sessions,
+                *st.session_state.session_messages.keys(),
+                *st.session_state.session_job_descriptions.keys(),
+                *st.session_state.ended_sessions,
+                current_id,
+            ]
+        )
+    )
     id_mapping: dict[str, str] = {}
     for old_id in all_ids:
         if SESSION_ID_PATTERN.fullmatch(str(old_id)):
@@ -299,10 +303,12 @@ def initialize_session() -> None:
         for session_id in st.session_state.ended_sessions
     }
     st.session_state.session_id = id_mapping[current_id]
-    st.session_state.recent_sessions = list(dict.fromkeys(
-        id_mapping.get(session_id, session_id)
-        for session_id in st.session_state.recent_sessions
-    ))
+    st.session_state.recent_sessions = list(
+        dict.fromkeys(
+            id_mapping.get(session_id, session_id)
+            for session_id in st.session_state.recent_sessions
+        )
+    )
     if st.session_state.session_id not in st.session_state.recent_sessions:
         st.session_state.recent_sessions.insert(0, st.session_state.session_id)
     st.session_state.session_messages.setdefault(
@@ -320,7 +326,9 @@ def initialize_session() -> None:
         st.session_state.pending_search = None
         st.session_state.session_job_descriptions[st.session_state.session_id] = None
         st.session_state.messages = welcome_messages()
-        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
+        st.session_state.session_messages[
+            st.session_state.session_id
+        ] = st.session_state.messages
 
 
 # ============================================================
@@ -421,7 +429,9 @@ def _index_existing_resumes(application: Any) -> None:
                 try:
                     result = application.ingest_files([path], DocumentType.RESUME)
                 except Exception:
-                    logger.exception("Resume ingestion raised an error | file=%s", path.name)
+                    logger.exception(
+                        "Resume ingestion raised an error | file=%s", path.name
+                    )
                     result = {"failed_files": 1}
 
                 if result.get("failed_files", 0):
@@ -449,7 +459,9 @@ def _index_existing_resumes(application: Any) -> None:
                     )
                 pending_files.pop(path, None)
 
-            tracked_paths = known_files.keys() | pending_files.keys() | retry_state.keys()
+            tracked_paths = (
+                known_files.keys() | pending_files.keys() | retry_state.keys()
+            )
             for path in tracked_paths - current_files.keys():
                 known_files.pop(path, None)
                 pending_files.pop(path, None)
@@ -485,7 +497,7 @@ def render_header() -> None:
     """
 
     st.markdown(
-        f"""
+        """
         <div class="kokoro-hero">
           <div>
             <div class="kokoro-title">Kokoro AI</div>
@@ -503,8 +515,12 @@ def render_header() -> None:
 
 
 def save_current_session() -> None:
-    st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
-    st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
+    st.session_state.session_messages[
+        st.session_state.session_id
+    ] = st.session_state.messages
+    st.session_state.session_job_descriptions[
+        st.session_state.session_id
+    ] = st.session_state.job_description
 
 
 def start_new_session() -> None:
@@ -541,8 +557,7 @@ def render_sidebar() -> str:
 
     st.sidebar.markdown("#### Current session")
     chat_started = any(
-        message.get("role") == "user"
-        for message in st.session_state.messages
+        message.get("role") == "user" for message in st.session_state.messages
     )
     if chat_started:
         st.sidebar.caption(f"Session ID · {st.session_state.session_id}")
@@ -567,16 +582,15 @@ def render_sidebar() -> str:
         width="stretch",
         help="Remove the messages and search context from this session.",
     ):
-
-        get_application().memory.clear_session(
-            st.session_state.session_id
-        )
+        get_application().memory.clear_session(st.session_state.session_id)
 
         st.session_state.messages = welcome_messages()
         st.session_state.job_description = None
         st.session_state.ended_sessions.discard(st.session_state.session_id)
         st.session_state.session_job_descriptions[st.session_state.session_id] = None
-        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
+        st.session_state.session_messages[
+            st.session_state.session_id
+        ] = st.session_state.messages
 
         st.session_state.last_response = None
 
@@ -586,6 +600,7 @@ def render_sidebar() -> str:
         st.sidebar.info("This chat has ended. Start a new chat to continue.")
 
     return page
+
 
 # ============================================================
 # Chat History
@@ -598,7 +613,6 @@ def render_chat_history() -> None:
     """
 
     for message in st.session_state.messages:
-
         role = message.get(
             "role",
             "assistant",
@@ -632,8 +646,7 @@ def render_job_description_status() -> None:
     """Show search context after the user starts chatting."""
 
     chat_started = any(
-        message.get("role") == "user"
-        for message in st.session_state.messages
+        message.get("role") == "user" for message in st.session_state.messages
     )
     if not chat_started:
         return
@@ -646,8 +659,8 @@ def render_job_description_status() -> None:
         st.session_state.job_prompt_seen_sessions.add(session_id)
         st.markdown(
             '<div class="jd-prompt"><span class="jd-prompt-icon">✦</span>'
-            '<div><strong>Add a job description for more context</strong><br>'
-            '<span>Paste one in the chat when you’re ready. Quick candidate searches work too.</span></div></div>',
+            "<div><strong>Add a job description for more context</strong><br>"
+            "<span>Paste one in the chat when you’re ready. Quick candidate searches work too.</span></div></div>",
             unsafe_allow_html=True,
         )
         return
@@ -661,11 +674,15 @@ def render_job_description_status() -> None:
         with action:
             if st.button("Change", key="change_jd", width="stretch"):
                 st.session_state.job_description = None
-                st.session_state.session_job_descriptions[st.session_state.session_id] = None
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": "Sure—paste the new job description in the chat and I’ll use it for the next search.",
-                })
+                st.session_state.session_job_descriptions[
+                    st.session_state.session_id
+                ] = None
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": "Sure—paste the new job description in the chat and I’ll use it for the next search.",
+                    }
+                )
                 st.rerun()
 
 
@@ -700,17 +717,12 @@ def extract_answer(
         return str(answer)
 
     if isinstance(response, dict):
-
-        answer = response.get(
-            "answer"
-        )
+        answer = response.get("answer")
 
         if answer:
             return str(answer)
 
-        response_text = response.get(
-            "response"
-        )
+        response_text = response.get("response")
 
         if response_text:
             return str(response_text)
@@ -733,41 +745,51 @@ def render_response_metadata(
     if response is None:
         return
 
-    with st.expander(
-        "Retrieval details"
-    ):
+    with st.expander("Retrieval details"):
         plan = getattr(response, "query_plan", None)
         if plan is not None:
-            st.write({
-                "search_depth": plan.search_depth.value,
-                "intent": plan.intent.value,
-                "sub_queries": plan.sub_queries,
-                "expanded_queries": plan.expanded_queries,
-                "retrieved_chunk_ids": response.retrieved_chunk_ids,
-                "latency_ms": response.latency_ms,
-            })
+            st.write(
+                {
+                    "search_depth": plan.search_depth.value,
+                    "intent": plan.intent.value,
+                    "sub_queries": plan.sub_queries,
+                    "expanded_queries": plan.expanded_queries,
+                    "retrieved_chunk_ids": response.retrieved_chunk_ids,
+                    "latency_ms": response.latency_ms,
+                }
+            )
 
 
 def render_candidate_cards(candidates: list[Any]) -> None:
-    has_fit_assessment = any(candidate.get("score_breakdown") for candidate in candidates)
+    has_fit_assessment = any(
+        candidate.get("score_breakdown") for candidate in candidates
+    )
     if candidates and has_fit_assessment:
         with st.expander("How the JD fit score is calculated"):
             st.caption("Evidence-based fit guidance, not a probability of hiring.")
-            st.write("Role relevance 30% · Skills match 35% · Experience 20% · Domain relevance 10% · Evidence strength 5%.")
+            st.write(
+                "Role relevance 30% · Skills match 35% · Experience 20% · Domain relevance 10% · Evidence strength 5%."
+            )
     elif candidates and not has_fit_assessment:
-        st.caption("Showing search relevance scores. These reflect query similarity, not a hiring probability.")
+        st.caption(
+            "Showing search relevance scores. These reflect query similarity, not a hiring probability."
+        )
 
     for index, candidate in enumerate(candidates, start=1):
         with st.container(border=True):
             title_col, score_col = st.columns([4, 1], vertical_alignment="center")
             with title_col:
                 st.caption(f"CANDIDATE {index:02d}")
-                candidate_name = candidate.get("candidate_name") or candidate.get("candidate_id", "Candidate")
+                candidate_name = candidate.get("candidate_name") or candidate.get(
+                    "candidate_id", "Candidate"
+                )
                 st.markdown(f"### {escape(str(candidate_name))}")
             score = candidate.get("match_score")
             if score is not None:
                 score = max(0.0, min(1.0, float(score)))
-                score_label = "Job fit" if candidate.get("score_breakdown") else "Search match"
+                score_label = (
+                    "Job fit" if candidate.get("score_breakdown") else "Search match"
+                )
                 with score_col:
                     st.markdown(f"**{score:.0%}**")
                     st.caption(score_label)
@@ -795,9 +817,16 @@ def render_candidate_cards(candidates: list[Any]) -> None:
                     for key, label in labels.items():
                         value = score_breakdown.get(key)
                         if value is not None:
-                            value = value.get("score") if isinstance(value, dict) else value
+                            value = (
+                                value.get("score") if isinstance(value, dict) else value
+                            )
                             if value is not None:
-                                breakdown_rows.append({"Dimension": label, "Score": f"{float(value):.0f}%"})
+                                breakdown_rows.append(
+                                    {
+                                        "Dimension": label,
+                                        "Score": f"{float(value):.0f}%",
+                                    }
+                                )
                     if breakdown_rows:
                         st.dataframe(breakdown_rows, hide_index=True, width="stretch")
 
@@ -805,16 +834,30 @@ def render_candidate_cards(candidates: list[Any]) -> None:
                 left, right = st.columns(2)
                 with left:
                     st.markdown("**Advantages**")
-                    st.write("\n".join(f"- {item}" for item in candidate.get("advantages", [])) or ", ".join(candidate.get("matched_skills", [])) or "No specific strengths identified.")
+                    st.write(
+                        "\n".join(
+                            f"- {item}" for item in candidate.get("advantages", [])
+                        )
+                        or ", ".join(candidate.get("matched_skills", []))
+                        or "No specific strengths identified."
+                    )
                 with right:
                     st.markdown("**Gaps to clarify**")
-                    st.write("\n".join(f"- {item}" for item in candidate.get("gaps", [])) or ", ".join(candidate.get("missing_skills", [])) or "No major gaps identified.")
+                    st.write(
+                        "\n".join(f"- {item}" for item in candidate.get("gaps", []))
+                        or ", ".join(candidate.get("missing_skills", []))
+                        or "No major gaps identified."
+                    )
             if candidate.get("explanation"):
                 st.write(candidate["explanation"])
 
             resume_paths = candidate_resume_paths(candidate)
             if resume_paths:
-                resume_key = str(candidate.get("candidate_id") or candidate.get("rank") or "candidate")
+                resume_key = str(
+                    candidate.get("candidate_id")
+                    or candidate.get("rank")
+                    or "candidate"
+                )
                 resume_panel = st.expander(
                     "View resume",
                     icon=":material/description:",
@@ -831,7 +874,9 @@ def render_candidate_cards(candidates: list[Any]) -> None:
                                 key=f"resume-choice-{resume_key}",
                             )
                             selected_resume = next(
-                                path for path in resume_paths if path.name == selected_name
+                                path
+                                for path in resume_paths
+                                if path.name == selected_name
                             )
 
                         if (
@@ -883,7 +928,9 @@ def process_query(
             session_id=st.session_state.session_id,
         )
     except Exception as exc:
-        logger.exception("Recruiter query failed | session_id=%s", st.session_state.session_id)
+        logger.exception(
+            "Recruiter query failed | session_id=%s", st.session_state.session_id
+        )
         st.error(str(exc))
         if settings.APP_ENV == "development":
             st.exception(exc)
@@ -908,45 +955,55 @@ def process_pending_search() -> None:
     st.session_state.pending_search = None
     with st.chat_message("assistant", avatar=str(ASSISTANT_AVATAR)):
         if pending["job_description_changed"]:
-            st.markdown("**Job description updated.** I’m searching the resume library now.")
+            st.markdown(
+                "**Job description updated.** I’m searching the resume library now."
+            )
         with st.spinner("Searching your resume library..."):
             response = process_query(pending["search_query"])
 
         if response is not None:
             answer = extract_answer(response)
             st.markdown(answer)
-            render_candidate_cards([
-                candidate.model_dump()
-                for candidate in response.candidates
-            ])
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": answer,
-                "candidates": [item.model_dump() for item in response.candidates],
-                "response_metadata": {
-                    "query_plan": response.query_plan.model_dump() if response.query_plan else None,
-                    "retrieved_chunk_ids": response.retrieved_chunk_ids,
-                    "latency_ms": response.latency_ms,
-                },
-            })
+            render_candidate_cards(
+                [candidate.model_dump() for candidate in response.candidates]
+            )
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": answer,
+                    "candidates": [item.model_dump() for item in response.candidates],
+                    "response_metadata": {
+                        "query_plan": response.query_plan.model_dump()
+                        if response.query_plan
+                        else None,
+                        "retrieved_chunk_ids": response.retrieved_chunk_ids,
+                        "latency_ms": response.latency_ms,
+                    },
+                }
+            )
         else:
             error_message = "I couldn’t complete that search. The job description is saved; please try again shortly."
             st.markdown(error_message)
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": error_message,
-            })
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": error_message,
+                }
+            )
 
-    st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
-    st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
+    st.session_state.session_messages[
+        st.session_state.session_id
+    ] = st.session_state.messages
+    st.session_state.session_job_descriptions[
+        st.session_state.session_id
+    ] = st.session_state.job_description
 
 
 def render_chat_input() -> None:
     """Render the input and queue new searches for the next UI pass."""
 
     chat_started = any(
-        message.get("role") == "user"
-        for message in st.session_state.messages
+        message.get("role") == "user" for message in st.session_state.messages
     )
     if not chat_started:
         st.caption(
@@ -971,9 +1028,15 @@ def render_chat_input() -> None:
             if st.session_state.job_description
             else "Hi, I’m Kira, Kokoro AI’s recruiting assistant. Ask me for a candidate profile or paste a job description, and I’ll search your resume library."
         )
-        st.session_state.messages.append({"role": "assistant", "content": greeting_reply})
-        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
-        st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
+        st.session_state.messages.append(
+            {"role": "assistant", "content": greeting_reply}
+        )
+        st.session_state.session_messages[
+            st.session_state.session_id
+        ] = st.session_state.messages
+        st.session_state.session_job_descriptions[
+            st.session_state.session_id
+        ] = st.session_state.job_description
         st.rerun()
 
     # Reject unsupported requests before they can be mistaken for a job
@@ -986,8 +1049,12 @@ def render_chat_input() -> None:
                 {"role": "assistant", "content": input_check.reason},
             ]
         )
-        st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
-        st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
+        st.session_state.session_messages[
+            st.session_state.session_id
+        ] = st.session_state.messages
+        st.session_state.session_job_descriptions[
+            st.session_state.session_id
+        ] = st.session_state.job_description
         st.rerun()
 
     is_new_jd = not st.session_state.job_description
@@ -1019,8 +1086,12 @@ def render_chat_input() -> None:
         "search_query": search_query,
         "job_description_changed": job_description_changed,
     }
-    st.session_state.session_messages[st.session_state.session_id] = st.session_state.messages
-    st.session_state.session_job_descriptions[st.session_state.session_id] = st.session_state.job_description
+    st.session_state.session_messages[
+        st.session_state.session_id
+    ] = st.session_state.messages
+    st.session_state.session_job_descriptions[
+        st.session_state.session_id
+    ] = st.session_state.job_description
     st.rerun()
 
 
@@ -1119,7 +1190,9 @@ def render_evaluation_tab() -> None:
                 st.markdown("**RAGAS metrics**")
                 st.json(ragas_result.model_dump())
             else:
-                st.warning("RAGAS could not complete. Check the application log for the provider error.")
+                st.warning(
+                    "RAGAS could not complete. Check the application log for the provider error."
+                )
     except Exception as exc:
         logger.exception("Evaluation tab failed | question=%r", question.strip())
         st.error(f"Evaluation failed: {exc}")
@@ -1154,6 +1227,7 @@ def render_styles() -> None:
         [data-testid="stChatMessage"] { border:1px solid var(--line); border-radius:16px; padding:14px 17px; background:var(--surface); box-shadow:0 3px 12px #20234a06; }
         [data-testid="stChatMessageAvatarUser"] { background:var(--brand) !important; color:#fff !important; }
         [data-testid="stChatInput"] { border-radius:14px; box-shadow:0 4px 18px #20234a0a; }
+        .chat-credit { position:fixed; z-index:1000; left:calc((100vw + 21rem) / 2); bottom:12px; transform:translateX(-50%); margin:0; color:var(--muted); font-size:12px; line-height:1.4; white-space:nowrap; pointer-events:none; }
         [data-testid="stSidebar"] button, .stButton button, [data-testid="stFormSubmitButton"] button { border-radius:10px; font-weight:600; }
         .stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] { box-shadow:0 4px 12px #5556d826; }
         div[data-testid="stMetric"] { background:var(--surface); border:1px solid var(--line); padding:12px 14px; border-radius:13px; box-shadow:0 3px 12px #20234a06; }
@@ -1164,6 +1238,7 @@ def render_styles() -> None:
         hr { border-color:var(--line); }
         @media (max-width: 768px) {
           .block-container { padding:1rem 1rem 2.5rem; }
+          .chat-credit { left:50%; bottom:8px; font-size:11px; }
           .kokoro-hero { gap:12px; margin-bottom:18px; padding-bottom:16px; }
           .kokoro-title { font-size:23px; }
           .kokoro-subtitle { font-size:13px; }
@@ -1215,17 +1290,22 @@ def main() -> None:
                 "optionally score generated answers with RAGAS."
             )
         render_evaluation_tab()
+        st.divider()
+        st.caption("Designed and developed by Rupesh Kumar")
     else:
         render_chat_history()
         if st.session_state.session_id in st.session_state.ended_sessions:
-            st.info("This chat has ended. Choose **New chat** to start another session.")
+            st.info(
+                "This chat has ended. Choose **New chat** to start another session."
+            )
         else:
             render_job_description_status()
             process_pending_search()
             render_chat_input()
-
-    st.divider()
-    st.caption("Designed and developed by Rupesh Kumar")
+        st.markdown(
+            '<div class="chat-credit">Designed and developed by Rupesh Kumar</div>',
+            unsafe_allow_html=True,
+        )
 
 
 if __name__ == "__main__":

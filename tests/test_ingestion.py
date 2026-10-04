@@ -1,6 +1,4 @@
-"""
-Tests for Kokoro ingestion module.
-"""
+"""Tests for the current PDF ingestion service API."""
 
 from __future__ import annotations
 
@@ -8,240 +6,99 @@ from pathlib import Path
 
 import pytest
 
-from core.ingestion.ingestion import (
-    FileIngestionService,
-)
+from core.ingestion.ingestion import IngestionService
+from utils.config import settings
+from utils.schemas import DocumentType
 
 
-# ============================================================
-# Helpers
-# ============================================================
+class MemoryRegistry:
+    """Small in-memory registry for ingestion unit tests."""
+
+    def __init__(self) -> None:
+        self.document_hashes: set[str] = set()
+
+    def exists(self, document_hash: str) -> bool:
+        return document_hash in self.document_hashes
+
+    def save(self, document: object) -> None:
+        self.document_hashes.add(document.document_hash)
 
 
-def create_service(tmp_path: Path) -> FileIngestionService:
-    """
-    Create an ingestion service using temporary directories.
-    """
+def create_service(registry: MemoryRegistry | None = None) -> IngestionService:
+    """Create the service without connecting to Pinecone."""
+    return IngestionService(vector_store=object(), registry=registry)
 
-    return FileIngestionService(
-        resume_directory=tmp_path / "resumes",
-        jd_directory=tmp_path / "jds",
+
+def test_ingestion_service_initialization() -> None:
+    service = create_service()
+
+    assert isinstance(service, IngestionService)
+    assert service.get_storage_directory(DocumentType.RESUME) == Path(
+        settings.RESUME_DIRECTORY
     )
+    assert service.get_storage_directory(DocumentType.JD) == Path(settings.JD_DIRECTORY)
 
 
-# ============================================================
-# Initialization
-# ============================================================
-
-
-def test_ingestion_service_initialization(
-    tmp_path: Path,
-):
-    service = create_service(tmp_path)
-
-    assert service is not None
-    assert service.resume_directory == (
-        tmp_path / "resumes"
-    )
-    assert service.jd_directory == (
-        tmp_path / "jds"
-    )
-
-
-# ============================================================
-# File Validation
-# ============================================================
-
-
-def test_valid_pdf_file(
-    tmp_path: Path,
-):
-    service = create_service(tmp_path)
-
+def test_valid_pdf_file_passes_validation(tmp_path: Path) -> None:
     pdf_file = tmp_path / "resume.pdf"
+    pdf_file.write_bytes(b"%PDF-1.4\n")
 
-    # Minimal PDF header for validation testing.
-    pdf_file.write_bytes(
-        b"%PDF-1.4\n"
-    )
-
-    assert service.validate_file(
-        pdf_file
-    ) is True
+    assert create_service().validate_file(pdf_file) is None
 
 
-def test_non_pdf_file_rejected(
-    tmp_path: Path,
-):
-    service = create_service(tmp_path)
+def test_non_pdf_file_is_rejected(tmp_path: Path) -> None:
+    text_file = tmp_path / "resume.txt"
+    text_file.write_text("Python developer", encoding="utf-8")
 
-    txt_file = tmp_path / "resume.txt"
-
-    txt_file.write_text(
-        "Python developer",
-        encoding="utf-8",
-    )
-
-    assert service.validate_file(
-        txt_file
-    ) is False
+    with pytest.raises(ValueError, match="Unsupported file extension"):
+        create_service().validate_file(text_file)
 
 
-def test_missing_file_rejected(
-    tmp_path: Path,
-):
-    service = create_service(tmp_path)
-
-    missing_file = (
-        tmp_path / "missing.pdf"
-    )
-
-    assert service.validate_file(
-        missing_file
-    ) is False
+def test_missing_file_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="File does not exist"):
+        create_service().validate_file(tmp_path / "missing.pdf")
 
 
-# ============================================================
-# File Hash
-# ============================================================
-
-
-def test_file_hash_is_deterministic(
-    tmp_path: Path,
-):
-    service = create_service(tmp_path)
-
+def test_file_hash_is_deterministic(tmp_path: Path) -> None:
     file_path = tmp_path / "resume.pdf"
+    file_path.write_bytes(b"%PDF-1.4\ncandidate")
+    service = create_service()
 
-    file_path.write_bytes(
-        b"%PDF-1.4\ncandidate"
-    )
-
-    first_hash = service.get_file_hash(
-        file_path
-    )
-
-    second_hash = service.get_file_hash(
-        file_path
-    )
+    first_hash = service.calculate_hash(file_path)
+    second_hash = service.calculate_hash(file_path)
 
     assert first_hash == second_hash
-    assert len(first_hash) > 0
+    assert len(first_hash) == 64
 
 
-# ============================================================
-# Duplicate Detection
-# ============================================================
+def test_duplicate_detection_uses_document_registry(tmp_path: Path) -> None:
+    registry = MemoryRegistry()
+    service = create_service(registry)
+    document_hash = "abc123"
+
+    assert service.is_duplicate(document_hash) is False
+    registry.document_hashes.add(document_hash)
+    assert service.is_duplicate(document_hash) is True
 
 
-def test_duplicate_file_detection(
+def test_save_file_creates_the_configured_destination(
     tmp_path: Path,
-):
-    service = create_service(tmp_path)
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume_directory = tmp_path / "resumes"
+    monkeypatch.setattr(settings, "RESUME_DIRECTORY", str(resume_directory))
+    source = tmp_path / "candidate.pdf"
+    source.write_bytes(b"%PDF-1.4\ncandidate")
 
-    file_path = tmp_path / "resume.pdf"
+    stored_path = create_service().save_file(source, DocumentType.RESUME)
 
-    file_path.write_bytes(
-        b"%PDF-1.4\ncandidate"
-    )
-
-    file_hash = service.get_file_hash(
-        file_path
-    )
-
-    assert (
-        service.is_duplicate(
-            file_hash
-        )
-        is False
-    )
-
-    service.register_hash(
-        file_hash
-    )
-
-    assert (
-        service.is_duplicate(
-            file_hash
-        )
-        is True
-    )
+    assert stored_path == resume_directory / source.name
+    assert stored_path.read_bytes() == source.read_bytes()
 
 
-# ============================================================
-# File Size
-# ============================================================
-
-
-def test_file_size(
-    tmp_path: Path,
-):
-    service = create_service(tmp_path)
-
-    file_path = tmp_path / "resume.pdf"
-
-    content = b"%PDF-1.4\ncandidate"
-
-    file_path.write_bytes(content)
-
-    assert service.get_file_size(
-        file_path
-    ) == len(content)
-
-
-# ============================================================
-# Directory Preparation
-# ============================================================
-
-
-def test_directories_are_created(
-    tmp_path: Path,
-):
-    service = create_service(tmp_path)
-
-    service.ensure_directories()
-
-    assert service.resume_directory.exists()
-    assert service.jd_directory.exists()
-
-
-# ============================================================
-# Unsupported Extension
-# ============================================================
-
-
-def test_unsupported_extension(
-    tmp_path: Path,
-):
-    service = create_service(tmp_path)
-
+def test_unsupported_extension_is_rejected(tmp_path: Path) -> None:
     file_path = tmp_path / "candidate.docx"
+    file_path.write_bytes(b"candidate")
 
-    file_path.write_bytes(
-        b"candidate"
-    )
-
-    assert service.validate_file(
-        file_path
-    ) is False
-
-
-# ============================================================
-# Empty File
-# ============================================================
-
-
-def test_empty_file_rejected(
-    tmp_path: Path,
-):
-    service = create_service(tmp_path)
-
-    file_path = tmp_path / "empty.pdf"
-
-    file_path.write_bytes(
-        b""
-    )
-
-    assert service.validate_file(
-        file_path
-    ) is False
+    with pytest.raises(ValueError, match="Unsupported file extension"):
+        create_service().validate_file(file_path)

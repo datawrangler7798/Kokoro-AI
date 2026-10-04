@@ -19,12 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from utils.schemas import (
-    PromptContext,
-    RerankResult,
-    RetrievalResult,
-)
-
+from utils.schemas import PromptContext, RerankResult, RetrievalResult
 
 # ============================================================
 # System Instructions
@@ -89,15 +84,10 @@ class PromptBuilder:
         system_instruction: str | None = None,
         guardrail_instruction: str | None = None,
     ) -> None:
-
-        self.system_instruction = (
-            system_instruction
-            or DEFAULT_SYSTEM_INSTRUCTION
-        )
+        self.system_instruction = system_instruction or DEFAULT_SYSTEM_INSTRUCTION
 
         self.guardrail_instruction = (
-            guardrail_instruction
-            or DEFAULT_GUARDRAIL_INSTRUCTION
+            guardrail_instruction or DEFAULT_GUARDRAIL_INSTRUCTION
         )
 
     # ========================================================
@@ -136,7 +126,6 @@ class PromptBuilder:
             results,
             start=1,
         ):
-
             metadata = result.metadata or {}
 
             candidate_id = metadata.get(
@@ -153,18 +142,9 @@ class PromptBuilder:
                 "\n".join(
                     [
                         f"[Evidence {index}]",
-                        (
-                            f"Chunk ID: "
-                            f"{result.chunk_id}"
-                        ),
-                        (
-                            f"Candidate ID: "
-                            f"{candidate_id}"
-                        ),
-                        (
-                            f"Document ID: "
-                            f"{document_id}"
-                        ),
+                        (f"Chunk ID: " f"{result.chunk_id}"),
+                        (f"Candidate ID: " f"{candidate_id}"),
+                        (f"Document ID: " f"{document_id}"),
                         (
                             f"Retrieval Score: "
                             f"{getattr(result, 'score', getattr(result, 'raw_score', 0.0)):.4f}"
@@ -195,59 +175,24 @@ class PromptBuilder:
         sections: list[str] = []
 
         for result in results:
+            matched_skills = ", ".join(result.matched_skills)
 
-            matched_skills = ", ".join(
-                result.matched_skills
-            )
+            missing_skills = ", ".join(result.missing_skills)
 
-            missing_skills = ", ".join(
-                result.missing_skills
-            )
-
-            evidence = "\n".join(
-                f"- {item}"
-                for item in result.evidence
-            )
+            evidence = "\n".join(f"- {item}" for item in result.evidence)
 
             sections.append(
                 "\n".join(
                     [
-                        (
-                            f"Candidate: "
-                            f"{result.candidate_id}"
-                        ),
-                        (
-                            f"Candidate Name: "
-                            f"{result.candidate_name}"
-                        ),
-                        (
-                            f"Match Score: "
-                            f"{result.match_score:.4f}"
-                        ),
-                        (
-                            f"Experience Match: "
-                            f"{result.experience_match}"
-                        ),
-                        (
-                            f"Matched Skills: "
-                            f"{matched_skills or 'None'}"
-                        ),
-                        (
-                            f"Missing Skills: "
-                            f"{missing_skills or 'None'}"
-                        ),
-                        (
-                            f"Explanation: "
-                            f"{result.explanation}"
-                        ),
-                        (
-                            "Evidence:\n"
-                            f"{evidence or '- None'}"
-                        ),
-                        (
-                            "Source Chunks: "
-                            f"{', '.join(result.source_chunk_ids)}"
-                        ),
+                        (f"Candidate: " f"{result.candidate_id}"),
+                        (f"Candidate Name: " f"{result.candidate_name}"),
+                        (f"Match Score: " f"{result.match_score:.4f}"),
+                        (f"Experience Match: " f"{result.experience_match}"),
+                        (f"Matched Skills: " f"{matched_skills or 'None'}"),
+                        (f"Missing Skills: " f"{missing_skills or 'None'}"),
+                        (f"Explanation: " f"{result.explanation}"),
+                        ("Evidence:\n" f"{evidence or '- None'}"),
+                        ("Source Chunks: " f"{', '.join(result.source_chunk_ids)}"),
                     ]
                 )
             )
@@ -263,10 +208,7 @@ class PromptBuilder:
         """
 
         if not memory:
-            return (
-                "No previous conversation context "
-                "is available."
-            )
+            return "No previous conversation context " "is available."
 
         return memory.strip()
 
@@ -279,10 +221,7 @@ class PromptBuilder:
         """
 
         if not jd_context:
-            return (
-                "No specific job-description context "
-                "is available."
-            )
+            return "No specific job-description context " "is available."
 
         return jd_context.strip()
 
@@ -305,15 +244,9 @@ class PromptBuilder:
         ]
 
         if additional_instructions:
-            sections.append(
-                additional_instructions.strip()
-            )
+            sections.append(additional_instructions.strip())
 
-        return "\n\n".join(
-            section
-            for section in sections
-            if section
-        )
+        return "\n\n".join(section for section in sections if section)
 
     # ========================================================
     # User Prompt
@@ -327,9 +260,7 @@ class PromptBuilder:
         Build a grounded user prompt from PromptContext.
         """
 
-        query = self._safe_text(
-            context.query
-        )
+        query = self._safe_text(context.query)
 
         memory = self._format_memory(
             getattr(
@@ -367,13 +298,9 @@ class PromptBuilder:
             )
         )
 
-        evidence_text = self._format_retrieval_results(
-            retrieved_results
-        )
+        evidence_text = self._format_retrieval_results(retrieved_results)
 
-        reranked_text = self._format_reranked_results(
-            reranked_results
-        )
+        reranked_text = self._format_reranked_results(reranked_results)
 
         sections = [
             "USER QUERY",
@@ -411,20 +338,10 @@ class PromptBuilder:
             [
                 "",
                 "RESPONSE REQUIREMENTS",
-                (
-                    "Answer the user query directly and concisely."
-                ),
-                (
-                    "Use the retrieved evidence to support "
-                    "factual claims."
-                ),
-                (
-                    "Do not invent information that is not "
-                    "present in the evidence."
-                ),
-                (
-                    "If evidence is insufficient, say so."
-                ),
+                ("Answer the user query directly and concisely."),
+                ("Use the retrieved evidence to support " "factual claims."),
+                ("Do not invent information that is not " "present in the evidence."),
+                ("If evidence is insufficient, say so."),
             ]
         )
 
@@ -452,13 +369,9 @@ class PromptBuilder:
 
         return {
             "system_prompt": self.build_system_prompt(
-                additional_instructions=(
-                    additional_system_instructions
-                )
+                additional_instructions=(additional_system_instructions)
             ),
-            "user_prompt": self.build_user_prompt(
-                context
-            ),
+            "user_prompt": self.build_user_prompt(context),
         }
 
 

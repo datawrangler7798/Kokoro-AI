@@ -9,14 +9,13 @@ from pathlib import Path
 import pytest
 
 from core.ingestion.parsing import (
-    clean_text,
-    detect_sections,
+    create_candidate_id,
+    create_document_id,
     extract_candidate_name,
-    generate_candidate_id,
-    generate_document_id,
+    extract_sections,
     parse_pdf,
+    preprocess_text,
 )
-
 
 # ============================================================
 # Text Cleaning
@@ -33,7 +32,7 @@ def test_clean_text_removes_extra_whitespace():
     5 years experience
     """
 
-    cleaned = clean_text(text)
+    cleaned = preprocess_text(text)
 
     assert "John Doe" in cleaned
     assert "Python Data Scientist" in cleaned
@@ -42,11 +41,11 @@ def test_clean_text_removes_extra_whitespace():
 
 
 def test_clean_text_empty_input():
-    assert clean_text("") == ""
+    assert preprocess_text("") == ""
 
 
 def test_clean_text_none_like_input():
-    assert clean_text(None) == ""
+    assert preprocess_text(None) == ""
 
 
 # ============================================================
@@ -69,22 +68,16 @@ def test_detect_sections():
     Senior Data Scientist at ABC.
     """
 
-    sections = detect_sections(text)
+    sections = extract_sections(text)
 
     assert isinstance(sections, dict)
 
     # The exact section representation depends on the
     # parser implementation, so verify the expected
     # section names are detected.
-    section_text = " ".join(
-        str(value)
-        for value in sections.values()
-    ).lower()
+    section_text = " ".join(str(value) for value in sections.values()).lower()
 
-    assert (
-        "professional summary" in section_text
-        or "data scientist" in section_text
-    )
+    assert "professional summary" in section_text or "data scientist" in section_text
 
 
 # ============================================================
@@ -103,9 +96,7 @@ def test_extract_candidate_name():
     Experienced data scientist with Python skills.
     """
 
-    name = extract_candidate_name(
-        text
-    )
+    name = extract_candidate_name(text)
 
     assert name is not None
     assert "John" in name
@@ -127,43 +118,29 @@ def test_extract_candidate_name_empty():
 
 
 def test_generate_document_id_is_deterministic():
-    file_path = Path(
-        "/data/resumes/candidate.pdf"
-    )
+    file_path = Path("/data/resumes/candidate.pdf")
 
-    first = generate_document_id(
-        file_path
-    )
+    first = create_document_id(file_path, document_hash="a" * 64)
 
-    second = generate_document_id(
-        file_path
-    )
+    second = create_document_id(file_path, document_hash="a" * 64)
 
     assert first == second
     assert first
 
 
 def test_generate_candidate_id_is_deterministic():
-    first = generate_candidate_id(
-        "John Doe"
-    )
+    first = create_candidate_id("John Doe", document_hash="a" * 64)
 
-    second = generate_candidate_id(
-        "John Doe"
-    )
+    second = create_candidate_id("John Doe", document_hash="a" * 64)
 
     assert first == second
     assert first
 
 
 def test_different_candidate_names_produce_different_ids():
-    first = generate_candidate_id(
-        "John Doe"
-    )
+    first = create_candidate_id("John Doe", document_hash="a" * 64)
 
-    second = generate_candidate_id(
-        "Jane Doe"
-    )
+    second = create_candidate_id("Jane Doe", document_hash="a" * 64)
 
     assert first != second
 
@@ -185,44 +162,30 @@ def create_minimal_pdf(
     """
 
     path.write_bytes(
-        (
-            b"%PDF-1.4\n"
-            b"1 0 obj\n"
-            b"<< /Type /Catalog >>\n"
-            b"endobj\n"
-            b"%%EOF\n"
-        )
+        (b"%PDF-1.4\n" b"1 0 obj\n" b"<< /Type /Catalog >>\n" b"endobj\n" b"%%EOF\n")
     )
 
 
 def test_parse_pdf_missing_file(
     tmp_path: Path,
 ):
-    pdf_path = (
-        tmp_path / "missing.pdf"
-    )
+    pdf_path = tmp_path / "missing.pdf"
 
-    with pytest.raises(
-        Exception
-    ):
+    with pytest.raises(Exception):
         parse_pdf(pdf_path)
 
 
 def test_parse_pdf_rejects_non_pdf(
     tmp_path: Path,
 ):
-    txt_path = (
-        tmp_path / "resume.txt"
-    )
+    txt_path = tmp_path / "resume.txt"
 
     txt_path.write_text(
         "John Doe Python Developer",
         encoding="utf-8",
     )
 
-    with pytest.raises(
-        Exception
-    ):
+    with pytest.raises(Exception):
         parse_pdf(txt_path)
 
 
@@ -238,18 +201,12 @@ def test_parse_pdf_returns_parsed_document(
     the underlying PDF library can process the file.
     """
 
-    pdf_path = (
-        tmp_path / "resume.pdf"
-    )
+    pdf_path = tmp_path / "resume.pdf"
 
-    create_minimal_pdf(
-        pdf_path
-    )
+    create_minimal_pdf(pdf_path)
 
     try:
-        result = parse_pdf(
-            pdf_path
-        )
+        result = parse_pdf(pdf_path)
     except Exception:
         # A deliberately minimal PDF may not contain enough
         # structure for every PDF backend.
@@ -272,9 +229,7 @@ def test_parse_pdf_returns_parsed_document(
 
 
 def test_cleaned_text_is_string():
-    text = clean_text(
-        "Python\n\nData Scientist"
-    )
+    text = preprocess_text("Python\n\nData Scientist")
 
     assert isinstance(
         text,
@@ -283,12 +238,8 @@ def test_cleaned_text_is_string():
 
 
 def test_candidate_id_changes_with_name():
-    id_1 = generate_candidate_id(
-        "Candidate One"
-    )
+    id_1 = create_candidate_id("Candidate One", document_hash="a" * 64)
 
-    id_2 = generate_candidate_id(
-        "Candidate Two"
-    )
+    id_2 = create_candidate_id("Candidate Two", document_hash="a" * 64)
 
     assert id_1 != id_2

@@ -77,27 +77,21 @@ def test_malicious_retrieved_content_is_detected(guardrails):
 
 def test_pii_detection_email(guardrails):
     """Email addresses should be detected as PII."""
-    result = guardrails.detect_pii(
-        "Candidate email is john.doe@example.com"
-    )
+    result = guardrails.detect_pii("Candidate email is john.doe@example.com")
 
     assert result is True
 
 
 def test_pii_detection_phone(guardrails):
     """Phone numbers should be detected as PII."""
-    result = guardrails.detect_pii(
-        "Candidate phone number is 9876543210"
-    )
+    result = guardrails.detect_pii("Candidate phone number is 9876543210")
 
     assert result is True
 
 
 def test_no_pii_in_normal_text(guardrails):
     """Normal text without obvious PII should pass PII detection."""
-    result = guardrails.detect_pii(
-        "Candidate has five years of Python experience."
-    )
+    result = guardrails.detect_pii("Candidate has five years of Python experience.")
 
     assert result is False
 
@@ -130,9 +124,7 @@ def test_output_with_prompt_injection_fails(guardrails):
 
 def test_validate_query_convenience_method(guardrails):
     """Convenience query validation should return a safe result."""
-    result = guardrails.validate_query(
-        "Find machine learning candidates."
-    )
+    result = guardrails.validate_query("Find machine learning candidates.")
 
     assert result.is_safe is True
 

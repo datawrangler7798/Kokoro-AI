@@ -51,7 +51,8 @@ def make_candidate(
         "candidate_id": candidate_id,
         "candidate_name": "Alex Candidate",
         "profile_summary": "Python engineer with five years of experience.",
-        "fit_scores": scores or {
+        "fit_scores": scores
+        or {
             "role_relevance": 90,
             "skills_match": 80,
             "experience_match": 70,
@@ -77,7 +78,7 @@ def test_prompt_requests_structured_fit_assessment():
         "Python engineer with Kubernetes",
         [make_result()],
     )
-    assert "fit_scores" in prompt
+    assert "Score fit dimensions from 0 to 100" in prompt
     assert "recommendation" in prompt
     assert "Kubernetes" in prompt
     assert "skills match 35%" in prompt
@@ -147,16 +148,22 @@ def test_weak_keyword_fallback_is_still_filtered():
         text="Accountant with accounting experience.",
         score=0.03,
     )
-    assert GeminiReranker._fallback_results(
-        [result], top_k=5, query="accountant with 4 years"
-    ) == []
+    assert (
+        GeminiReranker._fallback_results(
+            [result], top_k=5, query="accountant with 4 years"
+        )
+        == []
+    )
 
 
 def test_unrelated_resume_is_not_returned_for_genai_query_during_outage():
     result = make_result(text="Accountant with accounting experience.", score=0.40)
-    assert GeminiReranker._fallback_results(
-        [result], top_k=5, query="GenAI engineer with 1 year"
-    ) == []
+    assert (
+        GeminiReranker._fallback_results(
+            [result], top_k=5, query="GenAI engineer with 1 year"
+        )
+        == []
+    )
 
 
 def test_fallback_respects_minimum_experience_when_resume_has_dates():
@@ -172,9 +179,13 @@ def test_fallback_respects_minimum_experience_when_resume_has_dates():
         score=0.25,
     )
     fallback = GeminiReranker._fallback_results(
-        [intern, experienced], top_k=5, query="accountant with 4 years, Excel and QuickBooks"
+        [intern, experienced],
+        top_k=5,
+        query="accountant with 4 years, Excel and QuickBooks",
     )
-    assert [candidate.candidate_id for candidate in fallback] == ["experienced-accountant"]
+    assert [candidate.candidate_id for candidate in fallback] == [
+        "experienced-accountant"
+    ]
 
 
 def test_gemini_outage_fallback_does_not_claim_a_fit_score():

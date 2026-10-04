@@ -11,8 +11,8 @@ from google import genai
 
 from core.generation.prompt_builder import create_prompt_builder
 from core.guardrails.guardrails import create_guardrails
-from core.ingestion.parsing import parse_pdf, to_langchain_documents
 from core.ingestion.ingestion import create_ingestion_service
+from core.ingestion.parsing import parse_pdf, to_langchain_documents
 from core.ingestion.registry import DocumentRegistry
 from core.memory.memory_rag import create_memory_rag
 from core.retrieval.hybrid_indexer import create_hybrid_indexer
@@ -21,24 +21,23 @@ from core.retrieval.vector_store import create_vector_store
 from utils.config import get_settings
 from utils.logger import get_logger
 from utils.schemas import (
-    CandidateResult,
     CacheStatus,
+    CandidateResult,
     DocumentType,
     GuardrailResult,
     GuardrailStatus,
     KokoroResponse,
     OutputValidationResult,
     PromptContext,
-    RetrievalMethod,
-    RetrievalResult,
     QueryIntent,
     QueryPlan,
-    SearchFilters,
+    RetrievalMethod,
+    RetrievalResult,
     SearchDepth,
+    SearchFilters,
     ValidationStatus,
 )
 from utils.utils import calculate_file_hash, get_llm_rate_limiter
-
 
 logger = get_logger(__name__)
 
@@ -56,7 +55,9 @@ class KokoroApplication:
             loaded_bm25_chunks = self.hybrid_indexer.load_bm25()
             logger.info("Loaded BM25 resume corpus | chunks=%d", loaded_bm25_chunks)
         except Exception:
-            logger.exception("Could not load the persisted BM25 corpus; it will be rebuilt from local PDFs.")
+            logger.exception(
+                "Could not load the persisted BM25 corpus; it will be rebuilt from local PDFs."
+            )
         self.registry = DocumentRegistry()
         self.ingestion = create_ingestion_service(
             vector_store=self.vector_store,
@@ -171,7 +172,9 @@ class KokoroApplication:
         completed = 0
         total = len(resume_paths) + len(jd_paths)
 
-        def report_progress(done: int, _batch_total: int, result: dict[str, Any]) -> None:
+        def report_progress(
+            done: int, _batch_total: int, result: dict[str, Any]
+        ) -> None:
             nonlocal completed
             completed += 1
             if progress_callback is not None:
@@ -205,8 +208,7 @@ class KokoroApplication:
             pinecone_count = self._pinecone_vector_count(pinecone_stats)
             skipped_files = sum(batch["skipped_files"] for batch in batches)
             indexed_or_skipped_files = sum(
-                batch["successful_files"] + batch["skipped_files"]
-                for batch in batches
+                batch["successful_files"] + batch["skipped_files"] for batch in batches
             )
 
             # The registry is local bookkeeping. If it says documents exist
@@ -227,13 +229,9 @@ class KokoroApplication:
                 self.registry.clear()
                 batches = []
                 if resume_paths:
-                    batches.append(
-                        self.ingest_files(resume_paths, DocumentType.RESUME)
-                    )
+                    batches.append(self.ingest_files(resume_paths, DocumentType.RESUME))
                 if jd_paths:
-                    batches.append(
-                        self.ingest_files(jd_paths, DocumentType.JD)
-                    )
+                    batches.append(self.ingest_files(jd_paths, DocumentType.JD))
                 results = [item for batch in batches for item in batch["results"]]
                 pinecone_stats = self.vector_store.stats()
                 pinecone_count = self._pinecone_vector_count(pinecone_stats)
@@ -246,7 +244,9 @@ class KokoroApplication:
                 pinecone_stats,
             )
         except Exception:
-            logger.exception("Could not verify Pinecone index stats after startup ingestion.")
+            logger.exception(
+                "Could not verify Pinecone index stats after startup ingestion."
+            )
 
         return {
             "total_files": sum(batch["total_files"] for batch in batches),
@@ -267,6 +267,10 @@ class KokoroApplication:
         response = self._llm_client.models.generate_content(
             model=self.settings.LLM_MODEL,
             contents=f"{system_prompt}\n\n{user_prompt}",
+            config={
+                "temperature": self.settings.LLM_TEMPERATURE,
+                "max_output_tokens": self.settings.LLM_MAX_OUTPUT_TOKENS,
+            },
         )
         text = getattr(response, "text", None)
         if not text or not text.strip():
@@ -345,8 +349,10 @@ class KokoroApplication:
                 candidate_name=item.metadata.get("candidate_name"),
                 section=item.metadata.get("section"),
                 text=item.content,
-                source_file=item.metadata.get("source_file") or item.metadata.get("source"),
-                page_number=item.metadata.get("page_number") or item.metadata.get("page"),
+                source_file=item.metadata.get("source_file")
+                or item.metadata.get("source"),
+                page_number=item.metadata.get("page_number")
+                or item.metadata.get("page"),
                 retrieval_method=RetrievalMethod.HYBRID,
                 raw_score=item.hybrid_score,
                 normalized_score=item.hybrid_score,
@@ -371,7 +377,9 @@ class KokoroApplication:
                     pinecone_stats,
                 )
             except Exception:
-                logger.exception("Could not inspect Pinecone after an empty search result.")
+                logger.exception(
+                    "Could not inspect Pinecone after an empty search result."
+                )
 
         reranked = self.reranker.rerank(query, retrieved) if retrieved else []
         reranker_notice = getattr(reranked, "service_notice", None)
@@ -390,7 +398,8 @@ class KokoroApplication:
             prompt_context,
             additional_system_instructions=(
                 f"Relevant conversation context (not factual evidence):\n{memory_text}"
-                if memory_text else None
+                if memory_text
+                else None
             ),
         )
         if not reranked:

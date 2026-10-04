@@ -69,13 +69,8 @@ from pydantic import ValidationError
 
 from utils.config import settings
 from utils.logger import get_logger
+from utils.schemas import CandidateFitScores, RerankResult, RetrievalResult
 from utils.utils import get_llm_rate_limiter
-from utils.schemas import (
-    CandidateFitScores,
-    RerankResult,
-    RetrievalResult,
-)
-
 
 logger = get_logger(__name__)
 
@@ -196,21 +191,13 @@ class GeminiReranker:
         model: Optional[str] = None,
         max_retries: Optional[int] = None,
     ) -> None:
-
-        self.model = (
-            model
-            or settings.LLM_MODEL
-        )
+        self.model = model or settings.LLM_MODEL
 
         self.max_retries = (
-            max_retries
-            if max_retries is not None
-            else settings.MAX_RETRY_ATTEMPTS
+            max_retries if max_retries is not None else settings.MAX_RETRY_ATTEMPTS
         )
 
-        self._client: Optional[
-            genai.Client
-        ] = None
+        self._client: Optional[genai.Client] = None
 
         self._initialize()
 
@@ -223,14 +210,9 @@ class GeminiReranker:
         Initialize Gemini client.
         """
 
-        api_key = (
-            settings.GOOGLE_API_KEY
-            .get_secret_value()
-        )
+        api_key = settings.GOOGLE_API_KEY.get_secret_value()
 
-        self._client = genai.Client(
-            api_key=api_key
-        )
+        self._client = genai.Client(api_key=api_key)
 
         logger.info(
             "Gemini reranker initialized | model=%s",
@@ -251,11 +233,7 @@ class GeminiReranker:
         """
 
         if not query or not query.strip():
-
-            raise ValueError(
-                "Reranker query cannot be empty."
-            )
-
+            raise ValueError("Reranker query cannot be empty.")
 
     # ========================================================
     # TOP-K
@@ -277,10 +255,7 @@ class GeminiReranker:
             top_k = settings.RERANK_TOP_K
 
         if top_k <= 0:
-
-            raise ValueError(
-                "Rerank top_k must be greater than zero."
-            )
+            raise ValueError("Rerank top_k must be greater than zero.")
 
         # The retrieval layer may already have ranked results.
         # Sort again defensively by retrieval score.
@@ -294,9 +269,7 @@ class GeminiReranker:
             reverse=True,
         )
 
-        return sorted_results[
-            :top_k
-        ]
+        return sorted_results[:top_k]
 
     # ========================================================
     # PROMPT
@@ -322,7 +295,6 @@ class GeminiReranker:
             results,
             start=1,
         ):
-
             evidence_blocks.append(
                 f"""
 EVIDENCE {index}
@@ -337,9 +309,7 @@ text:
 """.strip()
             )
 
-        evidence_text = "\n\n".join(
-            evidence_blocks
-        )
+        evidence_text = "\n\n".join(evidence_blocks)
 
         return f"""
 You are Kokoro's candidate reranking component.
@@ -403,84 +373,43 @@ The application calculates the final score with these weights: role relevance 30
         """
 
         if not response_text:
-
-            raise ValueError(
-                "Gemini returned an empty reranker response."
-            )
+            raise ValueError("Gemini returned an empty reranker response.")
 
         text = response_text.strip()
 
-        if text.startswith(
-            "```"
-        ):
-
+        if text.startswith("```"):
             lines = text.splitlines()
 
             if lines:
-
                 lines = lines[1:]
 
-            if (
-                lines
-                and lines[-1].strip()
-                == "```"
-            ):
-
+            if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
 
-            text = "\n".join(
-                lines
-            ).strip()
+            text = "\n".join(lines).strip()
 
         try:
-
-            parsed = json.loads(
-                text
-            )
+            parsed = json.loads(text)
 
         except json.JSONDecodeError:
+            start = text.find("{")
 
-            start = text.find(
-                "{"
-            )
+            end = text.rfind("}")
 
-            end = text.rfind(
-                "}"
-            )
-
-            if (
-                start == -1
-                or end == -1
-                or end <= start
-            ):
-
-                raise ValueError(
-                    "Gemini reranker returned invalid JSON."
-                )
+            if start == -1 or end == -1 or end <= start:
+                raise ValueError("Gemini reranker returned invalid JSON.")
 
             try:
-
-                parsed = json.loads(
-                    text[
-                        start:
-                        end + 1
-                    ]
-                )
+                parsed = json.loads(text[start : end + 1])
 
             except json.JSONDecodeError as exc:
-
-                raise ValueError(
-                    "Failed to parse Gemini reranker JSON."
-                ) from exc
+                raise ValueError("Failed to parse Gemini reranker JSON.") from exc
 
         if not isinstance(
             parsed,
             dict,
         ):
-
-            raise ValueError(
-                "Reranker output must be a JSON object."
-            )
+            raise ValueError("Reranker output must be a JSON object.")
 
         return parsed
 
@@ -520,27 +449,18 @@ The application calculates the final score with these weights: role relevance 30
             value,
             list,
         ):
-
-            raise ValueError(
-                "Expected a list of strings."
-            )
+            raise ValueError("Expected a list of strings.")
 
         normalized: list[str] = []
 
         for item in value:
-
             if item is None:
                 continue
 
-            item_text = str(
-                item
-            ).strip()
+            item_text = str(item).strip()
 
             if item_text:
-
-                normalized.append(
-                    item_text
-                )
+                normalized.append(item_text)
 
         return normalized
 
@@ -561,13 +481,9 @@ The application calculates the final score with these weights: role relevance 30
         chunk references.
         """
 
-        retrieved_by_chunk = {
-            result.chunk_id: result
-            for result in retrieved_results
-        }
+        retrieved_by_chunk = {result.chunk_id: result for result in retrieved_results}
 
         for result in results:
-
             invalid_ids = [
                 chunk_id
                 for chunk_id in result.source_chunk_ids
@@ -575,7 +491,6 @@ The application calculates the final score with these weights: role relevance 30
             ]
 
             if invalid_ids:
-
                 raise ValueError(
                     "Reranker returned source_chunk_ids "
                     "that were not present in retrieved evidence: "
@@ -584,14 +499,21 @@ The application calculates the final score with these weights: role relevance 30
 
             for chunk_id in result.source_chunk_ids:
                 source = retrieved_by_chunk[chunk_id]
-                source_candidate_id = source.candidate_id or source.metadata.get("candidate_id")
-                if source_candidate_id and str(source_candidate_id) != result.candidate_id:
+                source_candidate_id = source.candidate_id or source.metadata.get(
+                    "candidate_id"
+                )
+                if (
+                    source_candidate_id
+                    and str(source_candidate_id) != result.candidate_id
+                ):
                     raise ValueError(
                         "Reranker attached evidence to the wrong candidate: "
                         f"candidate_id={result.candidate_id} chunk_id={chunk_id}"
                     )
 
-                source_name = source.candidate_name or source.metadata.get("candidate_name")
+                source_name = source.candidate_name or source.metadata.get(
+                    "candidate_name"
+                )
                 if (
                     source_name
                     and result.candidate_name
@@ -621,61 +543,38 @@ The application calculates the final score with these weights: role relevance 30
             raw,
             dict,
         ):
+            raise ValueError("Each reranker result must be an object.")
 
-            raise ValueError(
-                "Each reranker result must be an object."
-            )
+        candidate_id = raw.get("candidate_id")
 
-        candidate_id = raw.get(
-            "candidate_id"
-        )
-
-        candidate_name = raw.get(
-            "candidate_name"
-        )
+        candidate_name = raw.get("candidate_name")
 
         if not candidate_id:
-
-            raise ValueError(
-                "Reranker result is missing candidate_id."
-            )
+            raise ValueError("Reranker result is missing candidate_id.")
 
         if not candidate_name:
-
-            raise ValueError(
-                "Reranker result is missing candidate_name."
-            )
+            raise ValueError("Reranker result is missing candidate_name.")
 
         raw_scores = raw.get("fit_scores")
-        if not isinstance(raw_scores, dict) or not set(cls.SCORE_WEIGHTS).issubset(raw_scores):
+        if not isinstance(raw_scores, dict) or not set(cls.SCORE_WEIGHTS).issubset(
+            raw_scores
+        ):
             raise ValueError("Reranker result must include all fit_scores dimensions.")
         score_values = {
             key: cls._normalize_component_score(raw_scores[key])
             for key in cls.SCORE_WEIGHTS
         }
         score_breakdown = CandidateFitScores(**score_values)
-        match_score = sum(
-            score_values[key] * weight
-            for key, weight in cls.SCORE_WEIGHTS.items()
-        ) / 100
-
-        matched_skills = (
-            cls._normalize_string_list(
-                raw.get(
-                    "matched_skills"
-                )
-            )
+        match_score = (
+            sum(score_values[key] * weight for key, weight in cls.SCORE_WEIGHTS.items())
+            / 100
         )
+
+        matched_skills = cls._normalize_string_list(raw.get("matched_skills"))
 
         profile_summary = str(raw.get("profile_summary", "")).strip()
 
-        missing_skills = (
-            cls._normalize_string_list(
-                raw.get(
-                    "missing_skills"
-                )
-            )
-        )
+        missing_skills = cls._normalize_string_list(raw.get("missing_skills"))
 
         advantages = cls._normalize_string_list(raw.get("advantages", []))
         gaps = cls._normalize_string_list(raw.get("gaps", missing_skills))
@@ -683,21 +582,9 @@ The application calculates the final score with these weights: role relevance 30
         if not recommendation:
             raise ValueError("Reranker result must include a recruiter recommendation.")
 
-        evidence = (
-            cls._normalize_string_list(
-                raw.get(
-                    "evidence"
-                )
-            )
-        )
+        evidence = cls._normalize_string_list(raw.get("evidence"))
 
-        source_chunk_ids = (
-            cls._normalize_string_list(
-                raw.get(
-                    "source_chunk_ids"
-                )
-            )
-        )
+        source_chunk_ids = cls._normalize_string_list(raw.get("source_chunk_ids"))
 
         experience_match_value = raw.get("experience_match")
         if isinstance(experience_match_value, bool):
@@ -719,22 +606,15 @@ The application calculates the final score with these weights: role relevance 30
         ).strip()
 
         if not explanation:
-
-            raise ValueError(
-                "Reranker result must contain an explanation."
-            )
+            raise ValueError("Reranker result must contain an explanation.")
 
         # ----------------------------------------------------
         # Pydantic validation
         # ----------------------------------------------------
 
         return RerankResult(
-            candidate_id=str(
-                candidate_id
-            ),
-            candidate_name=str(
-                candidate_name
-            ),
+            candidate_id=str(candidate_id),
+            candidate_name=str(candidate_name),
             profile_summary=profile_summary or None,
             match_score=match_score,
             score_breakdown=score_breakdown,
@@ -764,30 +644,20 @@ The application calculates the final score with these weights: role relevance 30
         Parse and validate Gemini reranker output.
         """
 
-        payload = cls._extract_json(
-            response_text
-        )
+        payload = cls._extract_json(response_text)
 
-        raw_results = payload.get(
-            "results"
-        )
+        raw_results = payload.get("results")
 
         if not isinstance(
             raw_results,
             list,
         ):
-
-            raise ValueError(
-                "Reranker response must contain "
-                "a 'results' list."
-            )
+            raise ValueError("Reranker response must contain " "a 'results' list.")
 
         if not raw_results:
             return []
 
-        reranked: list[
-            RerankResult
-        ] = []
+        reranked: list[RerankResult] = []
 
         seen_candidates: set[str] = set()
 
@@ -795,7 +665,6 @@ The application calculates the final score with these weights: role relevance 30
             raw_results,
             start=1,
         ):
-
             result = cls._normalize_result(
                 raw=raw_result,
                 rank=index,
@@ -806,16 +675,11 @@ The application calculates the final score with these weights: role relevance 30
             # ------------------------------------------------
 
             if result.candidate_id in seen_candidates:
-
                 continue
 
-            seen_candidates.add(
-                result.candidate_id
-            )
+            seen_candidates.add(result.candidate_id)
 
-            reranked.append(
-                result
-            )
+            reranked.append(result)
 
         # ----------------------------------------------------
         # Validate evidence references.
@@ -827,8 +691,7 @@ The application calculates the final score with these weights: role relevance 30
         )
 
         reranked = [
-            result for result in reranked
-            if result.match_score >= cls.MIN_MATCH_SCORE
+            result for result in reranked if result.match_score >= cls.MIN_MATCH_SCORE
         ]
 
         # ----------------------------------------------------
@@ -844,7 +707,6 @@ The application calculates the final score with these weights: role relevance 30
             reranked,
             start=1,
         ):
-
             result.rank = rank
 
         return reranked
@@ -858,13 +720,56 @@ The application calculates the final score with these weights: role relevance 30
         """Return grounded candidates ranked by hybrid score when Gemini is down."""
 
         stop_words = {
-            "i", "im", "am", "a", "an", "the", "and", "or", "but",
-            "to", "of", "in", "on", "at", "for", "with", "from", "by",
-            "as", "is", "are", "was", "were", "be", "been", "being",
-            "have", "has", "had", "do", "does", "did", "which", "what",
-            "who", "that", "this", "these", "those", "looking", "want",
-            "need", "seeking", "candidate", "candidates", "skills", "skill",
-            "experience", "year", "years",
+            "i",
+            "im",
+            "am",
+            "a",
+            "an",
+            "the",
+            "and",
+            "or",
+            "but",
+            "to",
+            "of",
+            "in",
+            "on",
+            "at",
+            "for",
+            "with",
+            "from",
+            "by",
+            "as",
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "been",
+            "being",
+            "have",
+            "has",
+            "had",
+            "do",
+            "does",
+            "did",
+            "which",
+            "what",
+            "who",
+            "that",
+            "this",
+            "these",
+            "those",
+            "looking",
+            "want",
+            "need",
+            "seeking",
+            "candidate",
+            "candidates",
+            "skills",
+            "skill",
+            "experience",
+            "year",
+            "years",
         }
         query_terms = set(re.findall(r"[a-z]+", query.casefold())) - stop_words
         if "accountant" in query_terms:
@@ -901,7 +806,8 @@ The application calculates the final score with these weights: role relevance 30
             item = grouped.setdefault(
                 candidate_id,
                 {
-                    "candidate_name": result.candidate_name or result.metadata.get("candidate_name"),
+                    "candidate_name": result.candidate_name
+                    or result.metadata.get("candidate_name"),
                     "score": score,
                     "evidence": [],
                     "chunk_ids": [],
@@ -974,10 +880,7 @@ The application calculates the final score with these weights: role relevance 30
         """
 
         if self._client is None:
-
-            raise RuntimeError(
-                "Gemini client is not initialized."
-            )
+            raise RuntimeError("Gemini client is not initialized.")
 
         logger.debug(
             "Reranker prompt:\n%s",
@@ -985,18 +888,16 @@ The application calculates the final score with these weights: role relevance 30
         )
 
         get_llm_rate_limiter().acquire()
-        response = (
-            self._client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config={
-                    "temperature": settings.LLM_TEMPERATURE,
-                    # Five detailed candidate objects can exceed the old 2k cap.
-                    "max_output_tokens": max(settings.LLM_MAX_OUTPUT_TOKENS, 4096),
-                    "response_mime_type": "application/json",
-                    "response_schema": _RERANK_RESPONSE_SCHEMA,
-                },
-            )
+        response = self._client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config={
+                "temperature": settings.LLM_TEMPERATURE,
+                # Five detailed candidate objects can exceed the old 2k cap.
+                "max_output_tokens": max(settings.LLM_MAX_OUTPUT_TOKENS, 4096),
+                "response_mime_type": "application/json",
+                "response_schema": _RERANK_RESPONSE_SCHEMA,
+            },
         )
 
         response_text = getattr(
@@ -1006,10 +907,7 @@ The application calculates the final score with these weights: role relevance 30
         )
 
         if not response_text:
-
-            raise ValueError(
-                "Gemini returned an empty reranker response."
-            )
+            raise ValueError("Gemini returned an empty reranker response.")
 
         logger.debug(
             "Reranker raw response:\n%s",
@@ -1051,11 +949,9 @@ The application calculates the final score with these weights: role relevance 30
         if not results:
             return RerankResults()
 
-        selected_results = (
-            self._select_top_results(
-                results=results,
-                top_k=top_k,
-            )
+        selected_results = self._select_top_results(
+            results=results,
+            top_k=top_k,
         )
 
         prompt = self._build_prompt(
@@ -1065,45 +961,31 @@ The application calculates the final score with these weights: role relevance 30
 
         start_time = time.perf_counter()
 
-        last_error: Optional[
-            Exception
-        ] = None
+        last_error: Optional[Exception] = None
 
-        for attempt in range(
-            self.max_retries + 1
-        ):
-
+        for attempt in range(self.max_retries + 1):
             try:
-
                 if attempt > 0:
-
                     logger.warning(
                         "Retrying Gemini reranker | attempt=%d/%d",
                         attempt + 1,
                         self.max_retries + 1,
                     )
 
-                response_text = (
-                    self._call_gemini(
-                        prompt
-                    )
-                )
+                response_text = self._call_gemini(prompt)
 
-                reranked = (
-                    self._parse_results(
-                        response_text=response_text,
-                        retrieved_results=selected_results,
-                    )
+                reranked = self._parse_results(
+                    response_text=response_text,
+                    retrieved_results=selected_results,
                 )
 
                 if not reranked:
-                    logger.info("Gemini reranker found no relevant candidates | query=%s", query)
+                    logger.info(
+                        "Gemini reranker found no relevant candidates | query=%s", query
+                    )
                     return RerankResults()
 
-                elapsed_ms = (
-                    time.perf_counter()
-                    - start_time
-                ) * 1000
+                elapsed_ms = (time.perf_counter() - start_time) * 1000
 
                 logger.info(
                     "Gemini reranking completed | "
@@ -1126,7 +1008,6 @@ The application calculates the final score with these weights: role relevance 30
                 ValidationError,
                 TypeError,
             ) as exc:
-
                 last_error = exc
 
                 logger.warning(
@@ -1136,7 +1017,6 @@ The application calculates the final score with these weights: role relevance 30
                 )
 
             except Exception as exc:
-
                 last_error = exc
 
                 logger.exception(
@@ -1171,7 +1051,10 @@ The application calculates the final score with these weights: role relevance 30
                 "Gemini API rate limit reached. I can still show keyword-matched "
                 "resumes, but AI fit scoring and recommendations are temporarily unavailable."
             )
-        elif any(marker in error_text for marker in ("API_KEY_INVALID", "UNAUTHENTICATED", "401")):
+        elif any(
+            marker in error_text
+            for marker in ("API_KEY_INVALID", "UNAUTHENTICATED", "401")
+        ):
             notice = (
                 "Gemini authentication failed. Check GOOGLE_API_KEY in your .env file. "
                 "Keyword-matched resumes are still shown without AI fit scoring."
@@ -1234,9 +1117,7 @@ def create_reranker(
     Create a configured Gemini reranker.
     """
 
-    return GeminiReranker(
-        model=model
-    )
+    return GeminiReranker(model=model)
 
 
 # ============================================================

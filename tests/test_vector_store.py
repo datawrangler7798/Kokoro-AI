@@ -8,10 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from core.retrieval.vector_store import (
-    PineconeVectorStore,
-)
-
+from core.retrieval.vector_store import PineconeVectorStore
 
 # ============================================================
 # Fixtures
@@ -55,15 +52,9 @@ def test_vector_store_initialization(
 ):
     assert vector_store is not None
 
-    assert (
-        vector_store.index_name
-        == "test-index"
-    )
+    assert vector_store.index_name == "test-index"
 
-    assert (
-        vector_store.dimension
-        == 768
-    )
+    assert vector_store.dimension == 768
 
 
 # ============================================================
@@ -78,9 +69,7 @@ def test_valid_vector_dimension(
 
     # The store should accept a vector matching
     # the configured dimension.
-    vector_store._validate_vector(
-        vector
-    )
+    vector_store._validate_vector(vector)
 
 
 def test_invalid_vector_dimension(
@@ -88,12 +77,8 @@ def test_invalid_vector_dimension(
 ):
     vector = [0.1] * 767
 
-    with pytest.raises(
-        ValueError
-    ):
-        vector_store._validate_vector(
-            vector
-        )
+    with pytest.raises(ValueError):
+        vector_store._validate_vector(vector)
 
 
 # ============================================================
@@ -104,12 +89,8 @@ def test_invalid_vector_dimension(
 def test_empty_vector_rejected(
     vector_store,
 ):
-    with pytest.raises(
-        ValueError
-    ):
-        vector_store._validate_vector(
-            []
-        )
+    with pytest.raises(ValueError):
+        vector_store._validate_vector([])
 
 
 # ============================================================
@@ -127,12 +108,7 @@ def test_metadata_is_preserved(
         "document_type": "resume",
     }
 
-    assert (
-        vector_store._prepare_metadata(
-            metadata
-        )
-        == metadata
-    )
+    assert vector_store._prepare_metadata(metadata) == metadata
 
 
 # ============================================================
@@ -172,9 +148,7 @@ def test_query_calls_pinecone(
 ):
     vector_store.index = MagicMock()
 
-    vector_store.index.query.return_value = {
-        "matches": []
-    }
+    vector_store.index.query.return_value = {"matches": []}
 
     vector = [0.1] * 768
 
@@ -198,9 +172,7 @@ def test_query_rejects_wrong_dimension(
 ):
     vector = [0.1] * 767
 
-    with pytest.raises(
-        ValueError
-    ):
+    with pytest.raises(ValueError):
         vector_store.query(
             vector,
             top_k=5,
@@ -217,9 +189,7 @@ def test_query_rejects_invalid_top_k(
 ):
     vector = [0.1] * 768
 
-    with pytest.raises(
-        ValueError
-    ):
+    with pytest.raises(ValueError):
         vector_store.query(
             vector,
             top_k=0,
@@ -256,9 +226,7 @@ def test_stats(
 ):
     vector_store.index = MagicMock()
 
-    vector_store.index.describe_index_stats.return_value = {
-        "total_vector_count": 10
-    }
+    vector_store.index.describe_index_stats.return_value = {"total_vector_count": 10}
 
     stats = vector_store.stats()
 

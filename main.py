@@ -12,13 +12,12 @@ The business logic remains inside the core modules.
 
 from __future__ import annotations
 
-import sys
 import subprocess
+import sys
 from pathlib import Path
 
 from utils.config import get_settings
 from utils.logger import logger
-
 
 # ============================================================
 # Configuration
@@ -59,27 +58,21 @@ def startup_checks(
     requests.
     """
 
-    logger.info(
-        "Running Kokoro startup checks..."
-    )
+    logger.info("Running Kokoro startup checks...")
 
     # --------------------------------------------------------
     # Google API configuration
     # --------------------------------------------------------
 
     if not settings.GOOGLE_API_KEY:
-        logger.warning(
-            "GOOGLE_API_KEY is not configured."
-        )
+        logger.warning("GOOGLE_API_KEY is not configured.")
 
     # --------------------------------------------------------
     # Pinecone configuration
     # --------------------------------------------------------
 
     if not settings.PINECONE_API_KEY:
-        logger.warning(
-            "PINECONE_API_KEY is not configured."
-        )
+        logger.warning("PINECONE_API_KEY is not configured.")
 
     # --------------------------------------------------------
     # Configuration validation
@@ -89,7 +82,6 @@ def startup_checks(
         settings.validate_configuration()
 
     except Exception as exc:
-
         logger.error(
             "Configuration validation failed: %s",
             exc,
@@ -97,9 +89,7 @@ def startup_checks(
 
         return False
 
-    logger.info(
-        "Kokoro startup checks completed successfully."
-    )
+    logger.info("Kokoro startup checks completed successfully.")
 
     return True
 
@@ -121,10 +111,7 @@ def initialize_application():
     settings = initialize_configuration()
 
     if not startup_checks(settings):
-
-        raise RuntimeError(
-            "Kokoro startup checks failed."
-        )
+        raise RuntimeError("Kokoro startup checks failed.")
 
     logger.info(
         "%s application initialized.",
@@ -165,17 +152,13 @@ def main() -> int:
     """
 
     try:
-
         initialize_application()
 
-        logger.info(
-            "Kokoro startup completed."
-        )
+        logger.info("Kokoro startup completed.")
 
         return 0
 
     except Exception as exc:
-
         logger.exception(
             "Kokoro startup failed: %s",
             exc,
@@ -190,6 +173,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(
-        main()
-    )
+    sys.exit(main())

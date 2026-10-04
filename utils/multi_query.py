@@ -43,7 +43,6 @@ from typing import Any, Optional
 from utils.config import settings
 from utils.logger import get_logger
 
-
 # ============================================================
 # LOGGER
 # ============================================================
@@ -130,7 +129,6 @@ def remove_duplicate_queries(
     seen: set[str] = set()
 
     for query in queries:
-
         cleaned = clean_query(query)
 
         if not cleaned:
@@ -257,7 +255,6 @@ def _extract_json_array(
     # --------------------------------------------------------
 
     try:
-
         parsed = json.loads(response)
 
         if isinstance(parsed, list):
@@ -276,22 +273,16 @@ def _extract_json_array(
     if start == -1 or end == -1:
         return []
 
-    candidate = response[
-        start : end + 1
-    ]
+    candidate = response[start : end + 1]
 
     try:
-
         parsed = json.loads(candidate)
 
         if isinstance(parsed, list):
             return parsed
 
     except json.JSONDecodeError:
-
-        logger.debug(
-            "Unable to parse multi-query response as JSON."
-        )
+        logger.debug("Unable to parse multi-query response as JSON.")
 
     return []
 
@@ -315,14 +306,11 @@ def normalize_expanded_queries(
     already available to the retrieval pipeline.
     """
 
-    original_normalized = clean_query(
-        original_query
-    ).lower()
+    original_normalized = clean_query(original_query).lower()
 
     normalized_queries: list[str] = []
 
     for query in queries:
-
         # ----------------------------------------------------
         # Only accept string queries.
         # ----------------------------------------------------
@@ -339,10 +327,7 @@ def normalize_expanded_queries(
         # Do not duplicate the original query.
         # ----------------------------------------------------
 
-        if (
-            query.lower()
-            == original_normalized
-        ):
+        if query.lower() == original_normalized:
             continue
 
         normalized_queries.append(query)
@@ -351,11 +336,7 @@ def normalize_expanded_queries(
     # Remove duplicates.
     # --------------------------------------------------------
 
-    normalized_queries = (
-        remove_duplicate_queries(
-            normalized_queries
-        )
-    )
+    normalized_queries = remove_duplicate_queries(normalized_queries)
 
     # --------------------------------------------------------
     # Apply maximum query limit.
@@ -393,26 +374,18 @@ def _generate_queries_with_llm(
     """
 
     try:
-
         from google import genai
 
     except ImportError as exc:
-
         raise RuntimeError(
             "Google GenAI SDK is not installed. "
             "Install the required Gemini dependency."
         ) from exc
 
     try:
+        api_key = settings.GOOGLE_API_KEY.get_secret_value()
 
-        api_key = (
-            settings.GOOGLE_API_KEY
-            .get_secret_value()
-        )
-
-        client = genai.Client(
-            api_key=api_key
-        )
+        client = genai.Client(api_key=api_key)
 
         response = client.models.generate_content(
             model=settings.LLM_MODEL,
@@ -426,21 +399,14 @@ def _generate_queries_with_llm(
         )
 
         if not text:
-            raise RuntimeError(
-                "LLM returned an empty response."
-            )
+            raise RuntimeError("LLM returned an empty response.")
 
         return text
 
     except Exception as exc:
+        logger.exception("Multi-query LLM generation failed.")
 
-        logger.exception(
-            "Multi-query LLM generation failed."
-        )
-
-        raise RuntimeError(
-            "Failed to generate expanded queries."
-        ) from exc
+        raise RuntimeError("Failed to generate expanded queries.") from exc
 
 
 # ============================================================
@@ -488,11 +454,7 @@ def expand_query(
     query = clean_query(query)
 
     if not validate_query(query):
-
-        logger.warning(
-            "Query is too short or empty for multi-query "
-            "expansion."
-        )
+        logger.warning("Query is too short or empty for multi-query " "expansion.")
 
         return []
 
@@ -502,9 +464,7 @@ def expand_query(
     if max_queries <= 0:
         return []
 
-    logger.debug(
-        "Starting multi-query expansion."
-    )
+    logger.debug("Starting multi-query expansion.")
 
     prompt = build_multi_query_prompt(
         query=query,
@@ -520,11 +480,7 @@ def expand_query(
         prompt,
     )
 
-    raw_response = (
-        _generate_queries_with_llm(
-            prompt
-        )
-    )
+    raw_response = _generate_queries_with_llm(prompt)
 
     # --------------------------------------------------------
     # Log complete LLM response for debugging.
@@ -535,23 +491,16 @@ def expand_query(
         raw_response,
     )
 
-    parsed_queries = (
-        _extract_json_array(
-            raw_response
-        )
-    )
+    parsed_queries = _extract_json_array(raw_response)
 
-    expanded_queries = (
-        normalize_expanded_queries(
-            queries=parsed_queries,
-            original_query=query,
-            max_queries=max_queries,
-        )
+    expanded_queries = normalize_expanded_queries(
+        queries=parsed_queries,
+        original_query=query,
+        max_queries=max_queries,
     )
 
     logger.info(
-        "Multi-query expansion completed | "
-        "generated=%d",
+        "Multi-query expansion completed | " "generated=%d",
         len(expanded_queries),
     )
 
@@ -592,32 +541,20 @@ def expand_queries(
     results: dict[str, list[str]] = {}
 
     for query in queries:
+        cleaned_query = clean_query(query)
 
-        cleaned_query = clean_query(
-            query
-        )
-
-        if not validate_query(
-            cleaned_query
-        ):
+        if not validate_query(cleaned_query):
             results[query] = []
             continue
 
         try:
-
-            results[cleaned_query] = (
-                expand_query(
-                    cleaned_query,
-                    max_queries=max_queries_per_input,
-                )
+            results[cleaned_query] = expand_query(
+                cleaned_query,
+                max_queries=max_queries_per_input,
             )
 
         except Exception:
-
-            logger.exception(
-                "Multi-query expansion failed "
-                "for one query."
-            )
+            logger.exception("Multi-query expansion failed " "for one query.")
 
             # One query failure should not stop the
             # remaining queries.
@@ -661,29 +598,20 @@ def get_queries_for_retrieval(
     search router/retrieval layer.
     """
 
-    original_query = clean_query(
-        query
-    )
+    original_query = clean_query(query)
 
-    if not validate_query(
-        original_query
-    ):
+    if not validate_query(original_query):
         return []
 
     if enable_multi_query is None:
-        enable_multi_query = (
-            settings.ENABLE_MULTI_QUERY
-        )
+        enable_multi_query = settings.ENABLE_MULTI_QUERY
 
     # --------------------------------------------------------
     # Multi-query disabled.
     # --------------------------------------------------------
 
     if not enable_multi_query:
-
-        logger.debug(
-            "Multi-query expansion disabled."
-        )
+        logger.debug("Multi-query expansion disabled.")
 
         return [original_query]
 
@@ -692,19 +620,14 @@ def get_queries_for_retrieval(
     # --------------------------------------------------------
 
     try:
-
-        expanded_queries = (
-            expand_query(
-                query=original_query,
-                max_queries=max_queries,
-            )
+        expanded_queries = expand_query(
+            query=original_query,
+            max_queries=max_queries,
         )
 
     except Exception:
-
         logger.exception(
-            "Multi-query expansion failed. "
-            "Falling back to original query."
+            "Multi-query expansion failed. " "Falling back to original query."
         )
 
         return [original_query]
@@ -718,9 +641,7 @@ def get_queries_for_retrieval(
         *expanded_queries,
     ]
 
-    return remove_duplicate_queries(
-        all_queries
-    )
+    return remove_duplicate_queries(all_queries)
 
 
 # ============================================================

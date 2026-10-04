@@ -33,18 +33,12 @@ import unicodedata
 from pathlib import Path
 from typing import Optional
 
+from langchain_core.documents import Document as LangChainDocument
 from pypdf import PdfReader
 
-from langchain_core.documents import Document as LangChainDocument
-
 from utils.logger import get_logger
-from utils.utils import (
-    calculate_file_hash,
-    clean_string,
-    normalize_text,
-)
 from utils.schemas import DocumentType
-
+from utils.utils import calculate_file_hash, clean_string
 
 # ============================================================
 # LOGGER
@@ -119,14 +113,10 @@ def extract_pdf_text(
     path = Path(file_path)
 
     if not path.exists():
-        raise FileNotFoundError(
-            f"PDF file not found: {path}"
-        )
+        raise FileNotFoundError(f"PDF file not found: {path}")
 
     if not path.is_file():
-        raise ValueError(
-            f"PDF path is not a file: {path}"
-        )
+        raise ValueError(f"PDF path is not a file: {path}")
 
     logger.info(
         "Starting PDF text extraction | file=%s",
@@ -134,9 +124,7 @@ def extract_pdf_text(
     )
 
     try:
-        reader = PdfReader(
-            str(path)
-        )
+        reader = PdfReader(str(path))
 
         extracted_pages: list[str] = []
 
@@ -144,18 +132,12 @@ def extract_pdf_text(
             reader.pages,
             start=1,
         ):
-
             try:
-                page_text = (
-                    page.extract_text()
-                    or ""
-                )
+                page_text = page.extract_text() or ""
 
             except Exception as exc:
-
                 logger.warning(
-                    "Failed to extract page %d | "
-                    "file=%s | error=%s",
+                    "Failed to extract page %d | " "file=%s | error=%s",
                     page_number,
                     path.name,
                     str(exc),
@@ -164,24 +146,15 @@ def extract_pdf_text(
                 page_text = ""
 
             if page_text.strip():
-                extracted_pages.append(
-                    page_text
-                )
+                extracted_pages.append(page_text)
 
-        raw_text = "\n\n".join(
-            extracted_pages
-        )
+        raw_text = "\n\n".join(extracted_pages)
 
         if not raw_text.strip():
-
-            raise ValueError(
-                f"No extractable text found in PDF: "
-                f"{path.name}"
-            )
+            raise ValueError(f"No extractable text found in PDF: " f"{path.name}")
 
         logger.info(
-            "PDF extraction completed | file=%s "
-            "| pages=%d | characters=%d",
+            "PDF extraction completed | file=%s " "| pages=%d | characters=%d",
             path.name,
             len(reader.pages),
             len(raw_text),
@@ -193,15 +166,12 @@ def extract_pdf_text(
         raise
 
     except Exception as exc:
-
         logger.exception(
             "PDF extraction failed | file=%s",
             path.name,
         )
 
-        raise ValueError(
-            f"Failed to parse PDF: {path.name}"
-        ) from exc
+        raise ValueError(f"Failed to parse PDF: {path.name}") from exc
 
 
 # ============================================================
@@ -254,31 +224,22 @@ def remove_control_characters(
     cleaned_characters: list[str] = []
 
     for character in text:
-
         if character in (
             "\n",
             "\r",
             "\t",
         ):
-            cleaned_characters.append(
-                character
-            )
+            cleaned_characters.append(character)
             continue
 
-        category = unicodedata.category(
-            character
-        )
+        category = unicodedata.category(character)
 
         if category.startswith("C"):
             continue
 
-        cleaned_characters.append(
-            character
-        )
+        cleaned_characters.append(character)
 
-    return "".join(
-        cleaned_characters
-    )
+    return "".join(cleaned_characters)
 
 
 # ============================================================
@@ -403,17 +364,11 @@ def preprocess_text(
     if not text:
         return ""
 
-    text = normalize_unicode(
-        text
-    )
+    text = normalize_unicode(text)
 
-    text = remove_control_characters(
-        text
-    )
+    text = remove_control_characters(text)
 
-    text = fix_pdf_artifacts(
-        text
-    )
+    text = fix_pdf_artifacts(text)
 
     # Use the shared utility for general whitespace
     # normalization while preserving line structure.
@@ -422,7 +377,6 @@ def preprocess_text(
     cleaned_lines: list[str] = []
 
     for line in lines:
-
         line = line.strip()
 
         if not line:
@@ -435,13 +389,9 @@ def preprocess_text(
             line,
         )
 
-        cleaned_lines.append(
-            line
-        )
+        cleaned_lines.append(line)
 
-    text = "\n".join(
-        cleaned_lines
-    )
+    text = "\n".join(cleaned_lines)
 
     # Collapse excessive blank lines.
     text = re.sub(
@@ -465,9 +415,7 @@ def normalize_section_name(
     Normalize a section heading into a canonical name.
     """
 
-    cleaned = clean_string(
-        section_name
-    )
+    cleaned = clean_string(section_name)
 
     cleaned = cleaned.lower()
 
@@ -513,12 +461,7 @@ def is_section_heading(
     if not cleaned:
         return False
 
-    normalized = (
-        cleaned
-        .lower()
-        .rstrip(":")
-        .strip()
-    )
+    normalized = cleaned.lower().rstrip(":").strip()
 
     if normalized in SUPPORTED_SECTION_NAMES:
         return True
@@ -532,25 +475,14 @@ def is_section_heading(
     # CERTIFICATIONS
     # --------------------------------------------------------
 
-    letters = [
-        character
-        for character in cleaned
-        if character.isalpha()
-    ]
+    letters = [character for character in cleaned if character.isalpha()]
 
     if not letters:
         return False
 
-    uppercase_ratio = sum(
-        character.isupper()
-        for character in letters
-    ) / len(letters)
+    uppercase_ratio = sum(character.isupper() for character in letters) / len(letters)
 
-    if (
-        uppercase_ratio >= 0.85
-        and len(cleaned) <= 80
-        and len(cleaned.split()) <= 8
-    ):
+    if uppercase_ratio >= 0.85 and len(cleaned) <= 80 and len(cleaned.split()) <= 8:
         return True
 
     return False
@@ -587,44 +519,27 @@ def extract_sections(
     sections[current_section] = []
 
     for line in lines:
-
         stripped = line.strip()
 
         if not stripped:
-            sections[
-                current_section
-            ].append("")
+            sections[current_section].append("")
 
             continue
 
-        if is_section_heading(
-            stripped
-        ):
-
-            current_section = (
-                normalize_section_name(
-                    stripped
-                )
-            )
+        if is_section_heading(stripped):
+            current_section = normalize_section_name(stripped)
 
             if current_section not in sections:
-                sections[
-                    current_section
-                ] = []
+                sections[current_section] = []
 
             continue
 
-        sections[
-            current_section
-        ].append(stripped)
+        sections[current_section].append(stripped)
 
     result: dict[str, str] = {}
 
     for section, section_lines in sections.items():
-
-        section_text = "\n".join(
-            section_lines
-        ).strip()
+        section_text = "\n".join(section_lines).strip()
 
         if section_text:
             result[section] = section_text
@@ -656,10 +571,7 @@ def _looks_like_name(
     if len(line) > 100:
         return False
 
-    if any(
-        character.isdigit()
-        for character in line
-    ):
+    if any(character.isdigit() for character in line):
         return False
 
     words = line.split()
@@ -684,10 +596,7 @@ def _looks_like_name(
     if line.lower() in blocked_terms:
         return False
 
-    alpha_count = sum(
-        character.isalpha()
-        for character in line
-    )
+    alpha_count = sum(character.isalpha() for character in line)
 
     if alpha_count < 3:
         return False
@@ -706,15 +615,10 @@ def extract_candidate_name(
     assuming the first line is always the candidate name.
     """
 
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    ]
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
 
     # Only inspect a small number of leading lines.
     for line in lines[:10]:
-
         if _looks_like_name(line):
             return line
 
@@ -741,15 +645,9 @@ def create_document_id(
     path = Path(file_path)
 
     if document_hash is None:
-        document_hash = (
-            calculate_file_hash(
-                path
-            )
-        )
+        document_hash = calculate_file_hash(path)
 
-    return (
-        f"document_{document_hash[:16]}"
-    )
+    return f"document_{document_hash[:16]}"
 
 
 # ============================================================
@@ -772,12 +670,7 @@ def create_candidate_id(
     """
 
     if candidate_name:
-
-        candidate = (
-            candidate_name
-            .lower()
-            .strip()
-        )
+        candidate = candidate_name.lower().strip()
 
         candidate = re.sub(
             r"[^a-z0-9]+",
@@ -785,16 +678,12 @@ def create_candidate_id(
             candidate,
         )
 
-        candidate = candidate.strip(
-            "_"
-        )
+        candidate = candidate.strip("_")
 
         if candidate:
             return candidate
 
-    return (
-        f"candidate_{document_hash[:16]}"
-    )
+    return f"candidate_{document_hash[:16]}"
 
 
 # ============================================================
@@ -850,7 +739,6 @@ class ParsedDocument:
         sections: dict[str, str],
         page_count: int,
     ) -> None:
-
         self.document_id = document_id
         self.document_type = document_type
         self.candidate_id = candidate_id
@@ -942,94 +830,63 @@ def parse_pdf(
     # --------------------------------------------------------
 
     if document_hash is None:
-
-        document_hash = (
-            calculate_file_hash(
-                path
-            )
-        )
+        document_hash = calculate_file_hash(path)
 
     # --------------------------------------------------------
     # Create document ID when not already supplied.
     # --------------------------------------------------------
 
     if document_id is None:
-
-        document_id = (
-            create_document_id(
-                path,
-                document_hash,
-            )
+        document_id = create_document_id(
+            path,
+            document_hash,
         )
 
     # --------------------------------------------------------
     # Extract PDF text.
     # --------------------------------------------------------
 
-    raw_text = extract_pdf_text(
-        path
-    )
+    raw_text = extract_pdf_text(path)
 
     # --------------------------------------------------------
     # Preprocess.
     # --------------------------------------------------------
 
-    processed_text = preprocess_text(
-        raw_text
-    )
+    processed_text = preprocess_text(raw_text)
 
     if not processed_text:
-
-        raise ValueError(
-            f"PDF contains no usable text: "
-            f"{path.name}"
-        )
+        raise ValueError(f"PDF contains no usable text: " f"{path.name}")
 
     # --------------------------------------------------------
     # Candidate metadata.
     # --------------------------------------------------------
 
-    candidate_name = (
-        extract_candidate_name(
-            processed_text
-        )
-    )
+    candidate_name = extract_candidate_name(processed_text)
 
     candidate_id: Optional[str] = None
 
     if document_type == DocumentType.RESUME:
-
-        candidate_id = (
-            create_candidate_id(
-                candidate_name,
-                document_hash,
-            )
+        candidate_id = create_candidate_id(
+            candidate_name,
+            document_hash,
         )
 
     # --------------------------------------------------------
     # Section parsing.
     # --------------------------------------------------------
 
-    sections = extract_sections(
-        processed_text
-    )
+    sections = extract_sections(processed_text)
 
     # --------------------------------------------------------
     # Determine page count.
     # --------------------------------------------------------
 
     try:
+        reader = PdfReader(str(path))
 
-        reader = PdfReader(
-            str(path)
-        )
-
-        page_count = len(
-            reader.pages
-        )
+        page_count = len(reader.pages)
 
     except Exception:
-
         page_count = 0
 
     parsed_document = ParsedDocument(
@@ -1078,39 +935,23 @@ def to_langchain_documents(
     returned as one LangChain Document.
     """
 
-    documents: list[
-        LangChainDocument
-    ] = []
+    documents: list[LangChainDocument] = []
 
     base_metadata = {
-        "document_id": (
-            parsed_document.document_id
-        ),
+        "document_id": (parsed_document.document_id),
         "document_type": (
             parsed_document.document_type.value
             if hasattr(
                 parsed_document.document_type,
                 "value",
             )
-            else str(
-                parsed_document.document_type
-            )
+            else str(parsed_document.document_type)
         ),
-        "candidate_id": (
-            parsed_document.candidate_id
-        ),
-        "candidate_name": (
-            parsed_document.candidate_name
-        ),
-        "source_file": (
-            parsed_document.source_file
-        ),
-        "document_hash": (
-            parsed_document.document_hash
-        ),
-        "page_count": (
-            parsed_document.page_count
-        ),
+        "candidate_id": (parsed_document.candidate_id),
+        "candidate_name": (parsed_document.candidate_name),
+        "source_file": (parsed_document.source_file),
+        "document_hash": (parsed_document.document_hash),
+        "page_count": (parsed_document.page_count),
     }
 
     # --------------------------------------------------------
@@ -1118,20 +959,13 @@ def to_langchain_documents(
     # --------------------------------------------------------
 
     if parsed_document.sections:
-
-        for section_name, section_text in (
-            parsed_document.sections.items()
-        ):
-
+        for section_name, section_text in parsed_document.sections.items():
             metadata = {
                 **base_metadata,
                 "section": section_name,
             }
 
-            content = (
-                f"{section_name.replace('_', ' ').title()}\n"
-                f"{section_text}"
-            )
+            content = f"{section_name.replace('_', ' ').title()}\n" f"{section_text}"
 
             documents.append(
                 LangChainDocument(
@@ -1145,12 +979,9 @@ def to_langchain_documents(
     # --------------------------------------------------------
 
     else:
-
         documents.append(
             LangChainDocument(
-                page_content=(
-                    parsed_document.text
-                ),
+                page_content=(parsed_document.text),
                 metadata={
                     **base_metadata,
                     "section": "general",
@@ -1178,10 +1009,7 @@ def parse_to_langchain_documents(
     document_type: DocumentType = DocumentType.RESUME,
     document_id: Optional[str] = None,
     document_hash: Optional[str] = None,
-) -> tuple[
-    ParsedDocument,
-    list[LangChainDocument],
-]:
+) -> tuple[ParsedDocument, list[LangChainDocument],]:
     """
     Parse a PDF and immediately convert it to LangChain
     Documents.
@@ -1203,11 +1031,7 @@ def parse_to_langchain_documents(
         document_hash=document_hash,
     )
 
-    langchain_documents = (
-        to_langchain_documents(
-            parsed_document
-        )
-    )
+    langchain_documents = to_langchain_documents(parsed_document)
 
     return (
         parsed_document,

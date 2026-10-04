@@ -38,7 +38,6 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-
 # ============================================================
 # CONSTANTS
 # ============================================================
@@ -47,12 +46,7 @@ LOGGER_NAME = "kokoro"
 
 DEFAULT_LOG_LEVEL = "INFO"
 
-LOG_FORMAT = (
-    "%(asctime)s | "
-    "%(levelname)s | "
-    "%(name)s | "
-    "%(message)s"
-)
+LOG_FORMAT = "%(asctime)s | " "%(levelname)s | " "%(name)s | " "%(message)s"
 
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -88,9 +82,7 @@ def _get_log_level(
         CRITICAL
     """
 
-    level = (
-        level or DEFAULT_LOG_LEVEL
-    ).strip().upper()
+    level = (level or DEFAULT_LOG_LEVEL).strip().upper()
 
     levels = {
         "DEBUG": logging.DEBUG,
@@ -103,9 +95,7 @@ def _get_log_level(
     }
 
     if level not in levels:
-        raise ValueError(
-            f"Unsupported log level: {level}"
-        )
+        raise ValueError(f"Unsupported log level: {level}")
 
     return levels[level]
 
@@ -147,9 +137,7 @@ def configure_logger(
 
     global _configured
 
-    logger = logging.getLogger(
-        LOGGER_NAME
-    )
+    logger = logging.getLogger(LOGGER_NAME)
 
     log_level = _get_log_level(level)
 
@@ -164,79 +152,53 @@ def configure_logger(
     # --------------------------------------------------------
 
     if not _configured:
-
         # ----------------------------------------------------
         # Terminal handler
         # ----------------------------------------------------
 
-        console_handler = (
-            logging.StreamHandler(
-                sys.stdout
-            )
-        )
+        console_handler = logging.StreamHandler(sys.stdout)
 
-        console_handler.setLevel(
-            log_level
-        )
+        console_handler.setLevel(log_level)
 
         formatter = logging.Formatter(
             fmt=LOG_FORMAT,
             datefmt=DATE_FORMAT,
         )
 
-        console_handler.setFormatter(
-            formatter
-        )
+        console_handler.setFormatter(formatter)
 
-        logger.addHandler(
-            console_handler
-        )
+        logger.addHandler(console_handler)
 
         # ----------------------------------------------------
         # Optional file handler
         # ----------------------------------------------------
 
         if enable_file_logging:
-
             Path(log_directory).mkdir(
                 parents=True,
                 exist_ok=True,
             )
 
-            log_path = (
-                Path(log_directory)
-                / log_file
+            log_path = Path(log_directory) / log_file
+
+            file_handler = logging.FileHandler(
+                log_path,
+                encoding="utf-8",
             )
 
-            file_handler = (
-                logging.FileHandler(
-                    log_path,
-                    encoding="utf-8",
-                )
-            )
+            file_handler.setLevel(log_level)
 
-            file_handler.setLevel(
-                log_level
-            )
+            file_handler.setFormatter(formatter)
 
-            file_handler.setFormatter(
-                formatter
-            )
-
-            logger.addHandler(
-                file_handler
-            )
+            logger.addHandler(file_handler)
 
         _configured = True
 
     else:
-
         # Update existing handlers if configure_logger()
         # is called again.
         for handler in logger.handlers:
-            handler.setLevel(
-                log_level
-            )
+            handler.setLevel(log_level)
 
     return logger
 
@@ -270,18 +232,12 @@ def get_logger(
     if not name:
         return root_logger
 
-    if name.startswith(
-        f"{LOGGER_NAME}."
-    ):
+    if name.startswith(f"{LOGGER_NAME}."):
         logger_name = name
     else:
-        logger_name = (
-            f"{LOGGER_NAME}.{name}"
-        )
+        logger_name = f"{LOGGER_NAME}.{name}"
 
-    return logging.getLogger(
-        logger_name
-    )
+    return logging.getLogger(logger_name)
 
 
 # ============================================================
@@ -370,7 +326,6 @@ def log_exception(
     """
 
     if exception is not None:
-
         logger.error(
             "%s | %s: %s",
             message,
@@ -380,10 +335,7 @@ def log_exception(
         )
 
     else:
-
-        logger.exception(
-            message
-        )
+        logger.exception(message)
 
 
 # ============================================================
@@ -407,18 +359,12 @@ def log_request_start(
     """
 
     logger.info(
-        "Request started | request_id=%s "
-        "| session_id=%s",
+        "Request started | request_id=%s " "| session_id=%s",
         request_id,
         session_id,
     )
 
-    if (
-        query is not None
-        and logger.isEnabledFor(
-            logging.DEBUG
-        )
-    ):
+    if query is not None and logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "Request query | request_id=%s\n%s",
             request_id,
@@ -436,8 +382,7 @@ def log_request_complete(
     """
 
     logger.info(
-        "Request completed | request_id=%s "
-        "| latency_ms=%.2f",
+        "Request completed | request_id=%s " "| latency_ms=%.2f",
         request_id,
         latency_ms,
     )
@@ -454,10 +399,8 @@ def log_request_error(
     """
 
     if latency_ms is not None:
-
         logger.error(
-            "Request failed | request_id=%s "
-            "| latency_ms=%.2f | error=%s",
+            "Request failed | request_id=%s " "| latency_ms=%.2f | error=%s",
             request_id,
             latency_ms,
             str(exception),
@@ -465,10 +408,8 @@ def log_request_error(
         )
 
     else:
-
         logger.error(
-            "Request failed | request_id=%s "
-            "| error=%s",
+            "Request failed | request_id=%s " "| error=%s",
             request_id,
             str(exception),
             exc_info=True,
@@ -499,9 +440,7 @@ def log_resume_text(
     the logger level. DEBUG must be enabled.
     """
 
-    if not logger.isEnabledFor(
-        logging.DEBUG
-    ):
+    if not logger.isEnabledFor(logging.DEBUG):
         return
 
     logger.debug(
@@ -525,9 +464,7 @@ def log_document_text(
     Only active at DEBUG level.
     """
 
-    if not logger.isEnabledFor(
-        logging.DEBUG
-    ):
+    if not logger.isEnabledFor(logging.DEBUG):
         return
 
     logger.debug(
@@ -563,9 +500,7 @@ def log_chunk(
         - preprocessing
     """
 
-    if not logger.isEnabledFor(
-        logging.DEBUG
-    ):
+    if not logger.isEnabledFor(logging.DEBUG):
         return
 
     logger.debug(
@@ -592,8 +527,7 @@ def log_chunk_count(
     """
 
     logger.info(
-        "Chunking completed | document_id=%s "
-        "| chunk_count=%d",
+        "Chunking completed | document_id=%s " "| chunk_count=%d",
         document_id,
         chunk_count,
     )
@@ -614,8 +548,7 @@ def log_ingestion_start(
     """
 
     logger.info(
-        "Ingestion started | document_id=%s "
-        "| source_file=%s",
+        "Ingestion started | document_id=%s " "| source_file=%s",
         document_id,
         source_file,
     )
@@ -632,8 +565,7 @@ def log_ingestion_complete(
     """
 
     logger.info(
-        "Ingestion completed | document_id=%s "
-        "| chunks=%d | latency_ms=%.2f",
+        "Ingestion completed | document_id=%s " "| chunks=%d | latency_ms=%.2f",
         document_id,
         chunk_count,
         latency_ms,
@@ -653,8 +585,7 @@ def log_ingestion_skipped(
     """
 
     logger.warning(
-        "Ingestion skipped | document_id=%s "
-        "| reason=%s",
+        "Ingestion skipped | document_id=%s " "| reason=%s",
         document_id,
         reason,
     )
@@ -670,8 +601,7 @@ def log_ingestion_error(
     """
 
     logger.error(
-        "Ingestion failed | document_id=%s "
-        "| error=%s",
+        "Ingestion failed | document_id=%s " "| error=%s",
         document_id,
         str(exception),
         exc_info=True,
@@ -721,8 +651,7 @@ def log_pinecone_upsert(
     """
 
     logger.info(
-        "Pinecone upsert | document_id=%s "
-        "| vectors=%d | latency_ms=%.2f",
+        "Pinecone upsert | document_id=%s " "| vectors=%d | latency_ms=%.2f",
         document_id,
         vector_count,
         latency_ms,
@@ -745,23 +674,18 @@ def log_pinecone_search(
     """
 
     logger.info(
-        "Pinecone search | results=%d "
-        "| latency_ms=%.2f",
+        "Pinecone search | results=%d " "| latency_ms=%.2f",
         result_count,
         latency_ms,
     )
 
-    if logger.isEnabledFor(
-        logging.DEBUG
-    ):
-
+    if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "Pinecone query:\n%s",
             query,
         )
 
         if results is not None:
-
             logger.debug(
                 "Pinecone results:\n%s",
                 results,
@@ -787,23 +711,18 @@ def log_bm25_search(
     """
 
     logger.info(
-        "BM25 search | results=%d "
-        "| latency_ms=%.2f",
+        "BM25 search | results=%d " "| latency_ms=%.2f",
         result_count,
         latency_ms,
     )
 
-    if logger.isEnabledFor(
-        logging.DEBUG
-    ):
-
+    if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "BM25 query:\n%s",
             query,
         )
 
         if results is not None:
-
             logger.debug(
                 "BM25 results:\n%s",
                 results,
@@ -827,9 +746,7 @@ def log_hybrid_search(
     """
 
     logger.info(
-        "Hybrid search | pinecone=%d "
-        "| bm25=%d | final=%d "
-        "| latency_ms=%.2f",
+        "Hybrid search | pinecone=%d " "| bm25=%d | final=%d " "| latency_ms=%.2f",
         pinecone_count,
         bm25_count,
         final_count,
@@ -854,9 +771,7 @@ def log_reranker_input(
     in a particular order.
     """
 
-    if not logger.isEnabledFor(
-        logging.DEBUG
-    ):
+    if not logger.isEnabledFor(logging.DEBUG):
         return
 
     logger.debug(
@@ -877,9 +792,7 @@ def log_reranker_output(
     Log reranker output at DEBUG level.
     """
 
-    if not logger.isEnabledFor(
-        logging.DEBUG
-    ):
+    if not logger.isEnabledFor(logging.DEBUG):
         return
 
     logger.debug(
@@ -901,8 +814,7 @@ def log_reranking_complete(
     """
 
     logger.info(
-        "Reranking completed | input=%d "
-        "| output=%d | latency_ms=%.2f",
+        "Reranking completed | input=%d " "| output=%d | latency_ms=%.2f",
         input_count,
         output_count,
         latency_ms,
@@ -928,9 +840,7 @@ def log_llm_prompt(
     It is NOT displayed in Streamlit.
     """
 
-    if not logger.isEnabledFor(
-        logging.DEBUG
-    ):
+    if not logger.isEnabledFor(logging.DEBUG):
         return
 
     logger.debug(
@@ -957,9 +867,7 @@ def log_llm_response(
     This is backend-only.
     """
 
-    if not logger.isEnabledFor(
-        logging.DEBUG
-    ):
+    if not logger.isEnabledFor(logging.DEBUG):
         return
 
     logger.debug(
@@ -1011,8 +919,7 @@ def log_llm_error(
     """
 
     logger.error(
-        "LLM call failed | operation=%s "
-        "| model=%s | error=%s",
+        "LLM call failed | operation=%s " "| model=%s | error=%s",
         operation,
         model,
         str(exception),
@@ -1038,9 +945,7 @@ def log_prompt_context(
     This is useful when debugging RAG context assembly.
     """
 
-    if not logger.isEnabledFor(
-        logging.DEBUG
-    ):
+    if not logger.isEnabledFor(logging.DEBUG):
         return
 
     logger.debug(
@@ -1077,8 +982,7 @@ def log_memory_operation(
     """
 
     logger.debug(
-        "Memory operation | session_id=%s "
-        "| operation=%s | items=%d",
+        "Memory operation | session_id=%s " "| operation=%s | items=%d",
         session_id,
         operation,
         item_count,
@@ -1108,13 +1012,7 @@ def log_guardrail_result(
         status,
     )
 
-    if (
-        details is not None
-        and logger.isEnabledFor(
-            logging.DEBUG
-        )
-    ):
-
+    if details is not None and logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "Guardrail details:\n%s",
             details,
@@ -1142,13 +1040,7 @@ def log_validation_result(
         status,
     )
 
-    if (
-        details is not None
-        and logger.isEnabledFor(
-            logging.DEBUG
-        )
-    ):
-
+    if details is not None and logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "Validation details:\n%s",
             details,
@@ -1205,8 +1097,7 @@ def log_evaluation_start(
     """
 
     logger.info(
-        "Evaluation started | evaluation_id=%s "
-        "| dataset_size=%d",
+        "Evaluation started | evaluation_id=%s " "| dataset_size=%d",
         evaluation_id,
         dataset_size,
     )
@@ -1222,8 +1113,7 @@ def log_evaluation_complete(
     """
 
     logger.info(
-        "Evaluation completed | evaluation_id=%s "
-        "| latency_ms=%.2f",
+        "Evaluation completed | evaluation_id=%s " "| latency_ms=%.2f",
         evaluation_id,
         latency_ms,
     )
@@ -1250,14 +1140,12 @@ class LogTimer:
         operation: str,
         level: int = logging.DEBUG,
     ) -> None:
-
         self.logger = logger
         self.operation = operation
         self.level = level
         self.start_time: Optional[float] = None
 
     def __enter__(self) -> "LogTimer":
-
         self.start_time = time.perf_counter()
 
         return self
@@ -1268,19 +1156,14 @@ class LogTimer:
         exc_value: Any,
         traceback: Any,
     ) -> None:
-
         if self.start_time is None:
             return
 
-        elapsed_ms = (
-            time.perf_counter()
-            - self.start_time
-        ) * 1000
+        elapsed_ms = (time.perf_counter() - self.start_time) * 1000
 
         self.logger.log(
             self.level,
-            "Operation completed | "
-            "operation=%s | latency_ms=%.2f",
+            "Operation completed | " "operation=%s | latency_ms=%.2f",
             self.operation,
             elapsed_ms,
         )
@@ -1298,9 +1181,7 @@ def log_application_start(
     Log Kokoro startup.
     """
 
-    logger.info(
-        "========== KOKORO STARTED =========="
-    )
+    logger.info("========== KOKORO STARTED ==========")
 
 
 def log_application_shutdown(
@@ -1310,9 +1191,7 @@ def log_application_shutdown(
     Log Kokoro shutdown.
     """
 
-    logger.info(
-        "========== KOKORO SHUTDOWN =========="
-    )
+    logger.info("========== KOKORO SHUTDOWN ==========")
 
 
 # ============================================================

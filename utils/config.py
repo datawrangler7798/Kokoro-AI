@@ -75,12 +75,8 @@ class Settings(BaseSettings):
     # GOOGLE EMBEDDINGS
     # ============================================================
 
-    # The same embedding model is used for:
-    #
-    #   Resume/document → embedding
-    #   User query      → embedding
-    #
-    # Both must use the same embedding space.
+    # Legacy Google embedding adapter settings. The active Pinecone hybrid
+    # ingestion and search path uses the Pinecone-hosted models below instead.
 
     EMBEDDING_MODEL: str = "gemini-embedding-001"
 
@@ -99,6 +95,8 @@ class Settings(BaseSettings):
     # ============================================================
 
     PINECONE_INDEX_NAME: str = "hireflow"
+    PINECONE_CLOUD: str = "aws"
+    PINECONE_REGION: str = "us-east-1"
 
     # Hybrid vectors are stored together in the configured Pinecone index.
     PINECONE_DENSE_EMBEDDING_MODEL: str = "llama-text-embed-v2"
@@ -116,8 +114,9 @@ class Settings(BaseSettings):
     # Pinecone returns top 15 chunks.
     VECTOR_TOP_K: int = 15
 
-    # 2. Lexical retrieval
-    # BM25 returns top 15 chunks.
+    # 2. Sparse retrieval
+    # The legacy setting name remains BM25_TOP_K. It limits Pinecone's hosted
+    # sparse search; local BM25 is a compatibility fallback.
     BM25_TOP_K: int = 15
 
     # 3. Score fusion + normalization + deduplication
@@ -128,15 +127,6 @@ class Settings(BaseSettings):
     # Keep top 5 candidates/evidence units.
     RERANK_TOP_K: int = 5
 
-    # 5. Final evidence sent to generation.
-    FINAL_CONTEXT_K: int = 5
-
-    # ============================================================
-    # HYBRID SEARCH
-    # ============================================================
-
-    ENABLE_HYBRID_SEARCH: bool = True
-
     # Semantic + lexical retrieval.
     SEMANTIC_WEIGHT: float = 0.6
     LEXICAL_WEIGHT: float = 0.4
@@ -146,8 +136,6 @@ class Settings(BaseSettings):
     # ============================================================
 
     ENABLE_MULTI_QUERY: bool = True
-
-    ENABLE_QUERY_DECOMPOSITION: bool = True
 
     # ============================================================
     # CHUNKING
@@ -163,8 +151,6 @@ class Settings(BaseSettings):
 
     MAX_FILE_SIZE_MB: int = 10
 
-    MAX_BATCH_FILES: int = 50
-
     ALLOWED_FILE_EXTENSIONS: str = ".pdf"
 
     # ============================================================
@@ -179,9 +165,7 @@ class Settings(BaseSettings):
     BM25_DIRECTORY: str = "data/index/bm25"
 
     # Registry used for incremental/idempotent ingestion.
-    DOCUMENT_REGISTRY_PATH: str = (
-        "data/index/document_registry.json"
-    )
+    DOCUMENT_REGISTRY_PATH: str = "data/index/document_registry.json"
 
     # ============================================================
     # CACHE
@@ -195,8 +179,6 @@ class Settings(BaseSettings):
     # MEMORY
     # ============================================================
 
-    ENABLE_MEMORY: bool = True
-
     MAX_MEMORY_ITEMS: int = 10
 
     # ============================================================
@@ -209,28 +191,10 @@ class Settings(BaseSettings):
 
     BLOCK_PROMPT_INJECTION: bool = True
 
-    BLOCK_UNSUPPORTED_CLAIMS: bool = True
-
-    # ============================================================
-    # OUTPUT VALIDATION
-    # ============================================================
-
-    ENABLE_PYDANTIC_VALIDATION: bool = True
-
     MAX_RETRY_ATTEMPTS: int = 2
-
-    # ============================================================
-    # OBSERVABILITY
-    # ============================================================
-
-    ENABLE_OBSERVABILITY: bool = True
 
     # Do not log unnecessary resume PII.
     LOG_RESUME_PII: bool = False
-
-    LOG_RETRIEVAL_SCORES: bool = True
-
-    LOG_LATENCY: bool = True
 
     # ============================================================
     # EVALUATION
@@ -238,19 +202,7 @@ class Settings(BaseSettings):
 
     # Evaluation is exposed through the Streamlit Evaluation tab.
 
-    ENABLE_EVALUATION: bool = True
-
     ENABLE_RAGAS: bool = True
-
-    # Ground-truth evaluation dataset.
-    EVALUATION_DATASET_PATH: str = (
-        "evaluation/datasets/evaluation_dataset.json"
-    )
-
-    # Evaluation output/history.
-    EVALUATION_RESULTS_DIRECTORY: str = (
-        "evaluation/results"
-    )
 
     # Precision@K / Recall@K values.
     #
@@ -266,26 +218,6 @@ class Settings(BaseSettings):
     EVALUATION_K_VALUES: str = "1,3,5,10"
 
     # ============================================================
-    # UI FILTERS
-    # ============================================================
-
-    # Filters remain optional.
-    # Streamlit collects filters, but retrieval logic applies them.
-
-    ENABLE_UI_FILTERS: bool = True
-
-    # Available structured filters.
-    AVAILABLE_FILTERS: str = (
-        "experience,"
-        "location,"
-        "skills,"
-        "education,"
-        "certification,"
-        "jd,"
-        "document_type"
-    )
-
-    # ============================================================
     # VALIDATORS
     # ============================================================
 
@@ -298,11 +230,19 @@ class Settings(BaseSettings):
         """Ensure embedding dimensions are positive."""
 
         if value <= 0:
-            raise ValueError(
-                "Embedding/Pinecone dimension must be greater than 0."
-            )
+            raise ValueError("Embedding/Pinecone dimension must be greater than 0.")
 
         return value
+
+    @field_validator("PINECONE_METRIC")
+    @classmethod
+    def validate_pinecone_metric(cls, value: str) -> str:
+        """The current dense+sparse index implementation requires dotproduct."""
+
+        normalized = value.strip().lower()
+        if normalized != "dotproduct":
+            raise ValueError("PINECONE_METRIC must be 'dotproduct' for hybrid search.")
+        return normalized
 
     # ------------------------------------------------------------
     # Pinecone dimension must match embedding dimension.
@@ -313,10 +253,7 @@ class Settings(BaseSettings):
         """Ensure Pinecone and embedding dimensions match."""
 
         if self.PINECONE_DIMENSION != self.EMBEDDING_DIMENSION:
-            raise ValueError(
-                "PINECONE_DIMENSION must match "
-                "EMBEDDING_DIMENSION."
-            )
+            raise ValueError("PINECONE_DIMENSION must match " "EMBEDDING_DIMENSION.")
 
         return self
 
@@ -329,16 +266,13 @@ class Settings(BaseSettings):
         "BM25_TOP_K",
         "HYBRID_TOP_K",
         "RERANK_TOP_K",
-        "FINAL_CONTEXT_K",
     )
     @classmethod
     def validate_top_k(cls, value: int) -> int:
         """Ensure retrieval limits are positive."""
 
         if value <= 0:
-            raise ValueError(
-                "Retrieval top-k values must be greater than 0."
-            )
+            raise ValueError("Retrieval top-k values must be greater than 0.")
 
         return value
 
@@ -351,39 +285,28 @@ class Settings(BaseSettings):
         """
         Validate the retrieval pipeline hierarchy.
 
-        Expected flow:
+        Expected result limits:
 
         Pinecone/BM25
             ↓
         Hybrid
             ↓
         Reranker
-            ↓
-        Final context
         """
 
         if self.VECTOR_TOP_K < self.HYBRID_TOP_K:
             raise ValueError(
-                "VECTOR_TOP_K must be greater than or equal "
-                "to HYBRID_TOP_K."
+                "VECTOR_TOP_K must be greater than or equal " "to HYBRID_TOP_K."
             )
 
         if self.BM25_TOP_K < self.HYBRID_TOP_K:
             raise ValueError(
-                "BM25_TOP_K must be greater than or equal "
-                "to HYBRID_TOP_K."
+                "BM25_TOP_K must be greater than or equal " "to HYBRID_TOP_K."
             )
 
         if self.HYBRID_TOP_K < self.RERANK_TOP_K:
             raise ValueError(
-                "HYBRID_TOP_K must be greater than or equal "
-                "to RERANK_TOP_K."
-            )
-
-        if self.RERANK_TOP_K < self.FINAL_CONTEXT_K:
-            raise ValueError(
-                "RERANK_TOP_K must be greater than or equal "
-                "to FINAL_CONTEXT_K."
+                "HYBRID_TOP_K must be greater than or equal " "to RERANK_TOP_K."
             )
 
         return self
@@ -401,9 +324,7 @@ class Settings(BaseSettings):
         """Ensure retrieval weights are between 0 and 1."""
 
         if not 0.0 <= value <= 1.0:
-            raise ValueError(
-                "Retrieval weights must be between 0 and 1."
-            )
+            raise ValueError("Retrieval weights must be between 0 and 1.")
 
         return value
 
@@ -413,16 +334,10 @@ class Settings(BaseSettings):
         Ensure semantic and lexical weights sum to 1.
         """
 
-        total = (
-            self.SEMANTIC_WEIGHT
-            + self.LEXICAL_WEIGHT
-        )
+        total = self.SEMANTIC_WEIGHT + self.LEXICAL_WEIGHT
 
         if abs(total - 1.0) > 1e-6:
-            raise ValueError(
-                "SEMANTIC_WEIGHT + LEXICAL_WEIGHT "
-                "must equal 1.0."
-            )
+            raise ValueError("SEMANTIC_WEIGHT + LEXICAL_WEIGHT " "must equal 1.0.")
 
         return self
 
@@ -436,9 +351,7 @@ class Settings(BaseSettings):
         """Ensure chunk size is positive."""
 
         if value <= 0:
-            raise ValueError(
-                "CHUNK_SIZE must be greater than 0."
-            )
+            raise ValueError("CHUNK_SIZE must be greater than 0.")
 
         return value
 
@@ -452,9 +365,7 @@ class Settings(BaseSettings):
         """Ensure chunk overlap is non-negative."""
 
         if value < 0:
-            raise ValueError(
-                "CHUNK_OVERLAP cannot be negative."
-            )
+            raise ValueError("CHUNK_OVERLAP cannot be negative.")
 
         return value
 
@@ -463,9 +374,7 @@ class Settings(BaseSettings):
         """Ensure overlap is smaller than chunk size."""
 
         if self.CHUNK_OVERLAP >= self.CHUNK_SIZE:
-            raise ValueError(
-                "CHUNK_OVERLAP must be smaller than CHUNK_SIZE."
-            )
+            raise ValueError("CHUNK_OVERLAP must be smaller than CHUNK_SIZE.")
 
         return self
 
@@ -479,9 +388,7 @@ class Settings(BaseSettings):
         """Validate Gemini temperature."""
 
         if not 0.0 <= value <= 2.0:
-            raise ValueError(
-                "LLM_TEMPERATURE must be between 0 and 2."
-            )
+            raise ValueError("LLM_TEMPERATURE must be between 0 and 2.")
 
         return value
 
@@ -491,7 +398,6 @@ class Settings(BaseSettings):
 
     @field_validator(
         "LLM_REQUESTS_PER_MINUTE",
-        "MAX_BATCH_FILES",
         "MAX_FILE_SIZE_MB",
         "MAX_MEMORY_ITEMS",
         "MAX_RETRY_ATTEMPTS",
@@ -502,9 +408,7 @@ class Settings(BaseSettings):
         """Ensure operational limits are positive."""
 
         if value <= 0:
-            raise ValueError(
-                "Configuration value must be greater than 0."
-            )
+            raise ValueError("Configuration value must be greater than 0.")
 
         return value
 
@@ -531,19 +435,13 @@ class Settings(BaseSettings):
                 if value.strip()
             ]
         except ValueError as exc:
-            raise ValueError(
-                "EVALUATION_K_VALUES must contain only integers."
-            ) from exc
+            raise ValueError("EVALUATION_K_VALUES must contain only integers.") from exc
 
         if not values:
-            raise ValueError(
-                "EVALUATION_K_VALUES cannot be empty."
-            )
+            raise ValueError("EVALUATION_K_VALUES cannot be empty.")
 
         if any(value <= 0 for value in values):
-            raise ValueError(
-                "Evaluation K values must be greater than 0."
-            )
+            raise ValueError("Evaluation K values must be greater than 0.")
 
         return sorted(set(values))
 
@@ -567,17 +465,6 @@ class Settings(BaseSettings):
 
         return extensions
 
-    def get_available_filters(self) -> list[str]:
-        """
-        Convert configured UI filters into a list.
-        """
-
-        return [
-            filter_name.strip()
-            for filter_name in self.AVAILABLE_FILTERS.split(",")
-            if filter_name.strip()
-        ]
-
     def ensure_directories(self) -> None:
         """
         Create required local directories if they do not exist.
@@ -588,14 +475,12 @@ class Settings(BaseSettings):
             2. Streamlit uploads
             3. BM25 persistence
             4. Document registry
-            5. Evaluation results
         """
 
         directories = [
             self.RESUME_DIRECTORY,
             self.JD_DIRECTORY,
             self.BM25_DIRECTORY,
-            self.EVALUATION_RESULTS_DIRECTORY,
         ]
 
         for directory in directories:
@@ -604,20 +489,9 @@ class Settings(BaseSettings):
                 exist_ok=True,
             )
 
-        registry_parent = Path(
-            self.DOCUMENT_REGISTRY_PATH
-        ).parent
+        registry_parent = Path(self.DOCUMENT_REGISTRY_PATH).parent
 
         registry_parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        dataset_parent = Path(
-            self.EVALUATION_DATASET_PATH
-        ).parent
-
-        dataset_parent.mkdir(
             parents=True,
             exist_ok=True,
         )

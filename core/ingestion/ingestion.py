@@ -38,25 +38,16 @@ from typing import Any, Callable, Optional, Protocol
 from langchain_core.documents import Document as LangChainDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from core.ingestion.parsing import (
-    ParsedDocument,
-    parse_pdf,
-    to_langchain_documents,
-)
-
+from core.ingestion.parsing import ParsedDocument, parse_pdf, to_langchain_documents
 from utils.config import settings
 from utils.logger import get_logger
-from utils.schemas import (
-    DocumentType,
-    IngestionStatus,
-)
+from utils.schemas import DocumentType, IngestionStatus
 from utils.utils import (
     calculate_file_hash,
     get_file_extension,
     sanitize_filename,
     validate_file_size,
 )
-
 
 # ============================================================
 # LOGGER
@@ -146,17 +137,10 @@ class IngestionService:
 
     def __init__(
         self,
-        vector_store: Optional[
-            VectorStoreProtocol
-        ] = None,
-        hybrid_indexer: Optional[
-            HybridIndexerProtocol
-        ] = None,
-        registry: Optional[
-            RegistryProtocol
-        ] = None,
+        vector_store: Optional[VectorStoreProtocol] = None,
+        hybrid_indexer: Optional[HybridIndexerProtocol] = None,
+        registry: Optional[RegistryProtocol] = None,
     ) -> None:
-
         if vector_store is None:
             from core.retrieval.vector_store import create_vector_store
 
@@ -167,13 +151,11 @@ class IngestionService:
         self.hybrid_indexer = hybrid_indexer
         self.registry = registry
 
-        self._splitter = (
-            RecursiveCharacterTextSplitter(
-                chunk_size=settings.CHUNK_SIZE,
-                chunk_overlap=settings.CHUNK_OVERLAP,
-                length_function=len,
-                add_start_index=True,
-            )
+        self._splitter = RecursiveCharacterTextSplitter(
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+            length_function=len,
+            add_start_index=True,
         )
 
     # ========================================================
@@ -197,25 +179,16 @@ class IngestionService:
         path = Path(file_path)
 
         if not path.exists():
-            raise FileNotFoundError(
-                f"File does not exist: {path}"
-            )
+            raise FileNotFoundError(f"File does not exist: {path}")
 
         if not path.is_file():
-            raise ValueError(
-                f"Path is not a file: {path}"
-            )
+            raise ValueError(f"Path is not a file: {path}")
 
-        extension = get_file_extension(
-            path
-        ).lower()
+        extension = get_file_extension(path).lower()
 
-        allowed_extensions = (
-            settings.get_allowed_extensions()
-        )
+        allowed_extensions = settings.get_allowed_extensions()
 
         if extension not in allowed_extensions:
-
             raise ValueError(
                 f"Unsupported file extension "
                 f"'{extension}'. "
@@ -239,9 +212,7 @@ class IngestionService:
         Calculate SHA-256 hash for duplicate detection.
         """
 
-        return calculate_file_hash(
-            file_path
-        )
+        return calculate_file_hash(file_path)
 
     # ========================================================
     # DUPLICATE CHECK
@@ -265,18 +236,10 @@ class IngestionService:
             return False
 
         try:
-
-            return bool(
-                self.registry.exists(
-                    document_hash
-                )
-            )
+            return bool(self.registry.exists(document_hash))
 
         except Exception:
-
-            logger.exception(
-                "Document registry duplicate check failed."
-            )
+            logger.exception("Document registry duplicate check failed.")
 
             raise
 
@@ -293,13 +256,9 @@ class IngestionService:
         """
 
         if document_type == DocumentType.RESUME:
-            return Path(
-                settings.RESUME_DIRECTORY
-            )
+            return Path(settings.RESUME_DIRECTORY)
 
-        return Path(
-            settings.JD_DIRECTORY
-        )
+        return Path(settings.JD_DIRECTORY)
 
     def save_file(
         self,
@@ -316,30 +275,20 @@ class IngestionService:
 
         source = Path(source_path)
 
-        storage_directory = (
-            self.get_storage_directory(
-                document_type
-            )
-        )
+        storage_directory = self.get_storage_directory(document_type)
 
         storage_directory.mkdir(
             parents=True,
             exist_ok=True,
         )
 
-        safe_filename = sanitize_filename(
-            source.name
-        )
+        safe_filename = sanitize_filename(source.name)
 
-        destination = (
-            storage_directory
-            / safe_filename
-        )
+        destination = storage_directory / safe_filename
 
         # Avoid unnecessary copy when the source is already
         # inside the destination directory.
         try:
-
             if source.resolve() == destination.resolve():
                 return destination
 
@@ -377,11 +326,7 @@ class IngestionService:
         if not documents:
             return []
 
-        chunks = (
-            self._splitter.split_documents(
-                documents
-            )
-        )
+        chunks = self._splitter.split_documents(documents)
 
         # ----------------------------------------------------
         # Add deterministic chunk metadata.
@@ -393,7 +338,6 @@ class IngestionService:
         ] = {}
 
         for chunk in chunks:
-
             document_id = chunk.metadata.get(
                 "document_id",
                 "unknown_document",
@@ -404,36 +348,23 @@ class IngestionService:
                 "general",
             )
 
-            key = (
-                f"{document_id}:{section}"
+            key = f"{document_id}:{section}"
+
+            current_index = section_counters.get(
+                key,
+                0,
             )
 
-            current_index = (
-                section_counters.get(
-                    key,
-                    0,
-                )
+            chunk.metadata["chunk_index"] = current_index
+
+            chunk.metadata["chunk_id"] = (
+                f"{document_id}_" f"{section}_" f"{current_index:04d}"
             )
 
-            chunk.metadata[
-                "chunk_index"
-            ] = current_index
-
-            chunk.metadata[
-                "chunk_id"
-            ] = (
-                f"{document_id}_"
-                f"{section}_"
-                f"{current_index:04d}"
-            )
-
-            section_counters[key] = (
-                current_index + 1
-            )
+            section_counters[key] = current_index + 1
 
         logger.info(
-            "Document chunking completed | "
-            "input_documents=%d | chunks=%d",
+            "Document chunking completed | " "input_documents=%d | chunks=%d",
             len(documents),
             len(chunks),
         )
@@ -456,10 +387,8 @@ class IngestionService:
         """
 
         if self.vector_store is None:
-
             logger.warning(
-                "Vector store is not configured. "
-                "Skipping Pinecone indexing."
+                "Vector store is not configured. " "Skipping Pinecone indexing."
             )
 
             return None
@@ -469,9 +398,7 @@ class IngestionService:
             len(chunks),
         )
 
-        return self.vector_store.upsert_chunks(
-            chunks
-        )
+        return self.vector_store.upsert_chunks(chunks)
 
     def index_bm25(
         self,
@@ -485,10 +412,8 @@ class IngestionService:
         """
 
         if self.hybrid_indexer is None:
-
             logger.warning(
-                "Hybrid indexer is not configured. "
-                "Skipping BM25 indexing."
+                "Hybrid indexer is not configured. " "Skipping BM25 indexing."
             )
 
             return None
@@ -498,9 +423,7 @@ class IngestionService:
             len(chunks),
         )
 
-        return self.hybrid_indexer.add_documents(
-            chunks
-        )
+        return self.hybrid_indexer.add_documents(chunks)
 
     # ========================================================
     # REGISTRY
@@ -517,9 +440,7 @@ class IngestionService:
         if self.registry is None:
             return None
 
-        return self.registry.save(
-            parsed_document
-        )
+        return self.registry.save(parsed_document)
 
     # ========================================================
     # SINGLE FILE INGESTION
@@ -575,28 +496,20 @@ class IngestionService:
         )
 
         try:
-
             # ------------------------------------------------
             # 1. Validate
             # ------------------------------------------------
 
-            self.validate_file(
-                path
-            )
+            self.validate_file(path)
 
             # ------------------------------------------------
             # 2. SHA-256
             # ------------------------------------------------
 
-            document_hash = (
-                self.calculate_hash(
-                    path
-                )
-            )
+            document_hash = self.calculate_hash(path)
 
             logger.info(
-                "Document hash calculated | "
-                "file=%s | hash=%s",
+                "Document hash calculated | " "file=%s | hash=%s",
                 path.name,
                 document_hash,
             )
@@ -605,21 +518,15 @@ class IngestionService:
             # 3. Duplicate check
             # ------------------------------------------------
 
-            if self.is_duplicate(
-                document_hash
-            ):
-
+            if self.is_duplicate(document_hash):
                 logger.info(
-                    "Duplicate document skipped | "
-                    "file=%s | hash=%s",
+                    "Duplicate document skipped | " "file=%s | hash=%s",
                     path.name,
                     document_hash,
                 )
 
                 return {
-                    "status": (
-                        IngestionStatus.SKIPPED
-                    ),
+                    "status": (IngestionStatus.SKIPPED),
                     "source_file": path.name,
                     "document_hash": document_hash,
                     "document_id": None,
@@ -636,12 +543,9 @@ class IngestionService:
             stored_path = path
 
             if save_copy:
-
-                stored_path = (
-                    self.save_file(
-                        path,
-                        document_type,
-                    )
+                stored_path = self.save_file(
+                    path,
+                    document_type,
                 )
 
             # ------------------------------------------------
@@ -658,11 +562,7 @@ class IngestionService:
             # 6. Convert to LangChain Documents
             # ------------------------------------------------
 
-            documents = (
-                to_langchain_documents(
-                    parsed_document
-                )
-            )
+            documents = to_langchain_documents(parsed_document)
 
             # ------------------------------------------------
             # Log full parsed text at DEBUG only.
@@ -673,8 +573,7 @@ class IngestionService:
             # ------------------------------------------------
 
             logger.debug(
-                "FULL PARSED DOCUMENT TEXT | "
-                "document_id=%s\n%s",
+                "FULL PARSED DOCUMENT TEXT | " "document_id=%s\n%s",
                 parsed_document.document_id,
                 parsed_document.text,
             )
@@ -683,75 +582,44 @@ class IngestionService:
             # 7. Chunk
             # ------------------------------------------------
 
-            chunks = self.chunk_documents(
-                documents
-            )
+            chunks = self.chunk_documents(documents)
 
             if not chunks:
-
-                raise ValueError(
-                    "No retrieval chunks were created."
-                )
+                raise ValueError("No retrieval chunks were created.")
 
             # ------------------------------------------------
             # 8. Vector indexing
             # ------------------------------------------------
 
-            vector_result = (
-                self.index_vector_store(
-                    chunks
-                )
-            )
+            vector_result = self.index_vector_store(chunks)
 
             # ------------------------------------------------
             # 9. BM25 indexing
             # ------------------------------------------------
 
-            bm25_result = (
-                self.index_bm25(
-                    chunks
-                )
-            )
+            bm25_result = self.index_bm25(chunks)
 
             # ------------------------------------------------
             # 10. Registry
             # ------------------------------------------------
 
-            self.register_document(
-                parsed_document
-            )
+            self.register_document(parsed_document)
 
             # ------------------------------------------------
             # Successful result
             # ------------------------------------------------
 
             result = {
-                "status": (
-                    IngestionStatus.COMPLETED
-                ),
+                "status": (IngestionStatus.COMPLETED),
                 "source_file": path.name,
-                "stored_file": str(
-                    stored_path
-                ),
-                "document_hash": (
-                    document_hash
-                ),
-                "document_id": (
-                    parsed_document.document_id
-                ),
-                "candidate_id": (
-                    parsed_document.candidate_id
-                ),
-                "candidate_name": (
-                    parsed_document.candidate_name
-                ),
+                "stored_file": str(stored_path),
+                "document_hash": (document_hash),
+                "document_id": (parsed_document.document_id),
+                "candidate_id": (parsed_document.candidate_id),
+                "candidate_name": (parsed_document.candidate_name),
                 "chunk_count": len(chunks),
-                "page_count": (
-                    parsed_document.page_count
-                ),
-                "sections": list(
-                    parsed_document.sections.keys()
-                ),
+                "page_count": (parsed_document.page_count),
+                "sections": list(parsed_document.sections.keys()),
                 "vector_result": vector_result,
                 "bm25_result": bm25_result,
                 "error": None,
@@ -769,18 +637,14 @@ class IngestionService:
             return result
 
         except Exception as exc:
-
             logger.exception(
-                "Ingestion failed | file=%s | "
-                "error_type=%s",
+                "Ingestion failed | file=%s | " "error_type=%s",
                 path.name,
                 type(exc).__name__,
             )
 
             return {
-                "status": (
-                    IngestionStatus.FAILED
-                ),
+                "status": (IngestionStatus.FAILED),
                 "source_file": path.name,
                 "stored_file": None,
                 "document_hash": None,
@@ -805,9 +669,7 @@ class IngestionService:
         file_paths: list[str | Path],
         document_type: DocumentType = DocumentType.RESUME,
         save_copy: bool = True,
-        progress_callback: Optional[
-            Callable[[int, int, dict[str, Any]], None]
-        ] = None,
+        progress_callback: Optional[Callable[[int, int, dict[str, Any]], None]] = None,
     ) -> dict[str, Any]:
         """
         Ingest multiple files.
@@ -841,13 +703,9 @@ class IngestionService:
                     )
         """
 
-        total = len(
-            file_paths
-        )
+        total = len(file_paths)
 
-        results: list[
-            dict[str, Any]
-        ] = []
+        results: list[dict[str, Any]] = []
 
         completed = 0
         successful = 0
@@ -862,22 +720,17 @@ class IngestionService:
         )
 
         for file_path in file_paths:
-
             result = self.ingest_file(
                 file_path=file_path,
                 document_type=document_type,
                 save_copy=save_copy,
             )
 
-            results.append(
-                result
-            )
+            results.append(result)
 
             completed += 1
 
-            status = result.get(
-                "status"
-            )
+            status = result.get("status")
 
             if status == IngestionStatus.COMPLETED:
                 successful += 1
@@ -897,9 +750,7 @@ class IngestionService:
             )
 
             if progress_callback:
-
                 try:
-
                     progress_callback(
                         completed,
                         total,
@@ -907,10 +758,7 @@ class IngestionService:
                     )
 
                 except Exception:
-
-                    logger.exception(
-                        "Progress callback failed."
-                    )
+                    logger.exception("Progress callback failed.")
 
         batch_result = {
             "total_files": total,
@@ -942,27 +790,17 @@ class IngestionService:
 
 
 def ingest_existing_resumes(
-    vector_store: Optional[
-        VectorStoreProtocol
-    ] = None,
-    hybrid_indexer: Optional[
-        HybridIndexerProtocol
-    ] = None,
-    registry: Optional[
-        RegistryProtocol
-    ] = None,
-    progress_callback: Optional[
-        Callable[[int, int, dict[str, Any]], None]
-    ] = None,
+    vector_store: Optional[VectorStoreProtocol] = None,
+    hybrid_indexer: Optional[HybridIndexerProtocol] = None,
+    registry: Optional[RegistryProtocol] = None,
+    progress_callback: Optional[Callable[[int, int, dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
     """
     Discover and ingest PDF resumes already present in the
     configured resume directory.
     """
 
-    resume_directory = Path(
-        settings.RESUME_DIRECTORY
-    )
+    resume_directory = Path(settings.RESUME_DIRECTORY)
 
     if not resume_directory.exists():
         logger.info(
@@ -979,9 +817,7 @@ def ingest_existing_resumes(
             "results": [],
         }
 
-    file_paths = sorted(
-        resume_directory.glob("*.pdf")
-    )
+    file_paths = sorted(resume_directory.glob("*.pdf"))
 
     logger.info(
         "Discovered existing resumes | directory=%s | files=%d",
@@ -1005,15 +841,9 @@ def ingest_existing_resumes(
 
 
 def create_ingestion_service(
-    vector_store: Optional[
-        VectorStoreProtocol
-    ] = None,
-    hybrid_indexer: Optional[
-        HybridIndexerProtocol
-    ] = None,
-    registry: Optional[
-        RegistryProtocol
-    ] = None,
+    vector_store: Optional[VectorStoreProtocol] = None,
+    hybrid_indexer: Optional[HybridIndexerProtocol] = None,
+    registry: Optional[RegistryProtocol] = None,
 ) -> IngestionService:
     """
     Create an IngestionService.
@@ -1038,15 +868,9 @@ def create_ingestion_service(
 def ingest_file(
     file_path: str | Path,
     document_type: DocumentType = DocumentType.RESUME,
-    vector_store: Optional[
-        VectorStoreProtocol
-    ] = None,
-    hybrid_indexer: Optional[
-        HybridIndexerProtocol
-    ] = None,
-    registry: Optional[
-        RegistryProtocol
-    ] = None,
+    vector_store: Optional[VectorStoreProtocol] = None,
+    hybrid_indexer: Optional[HybridIndexerProtocol] = None,
+    registry: Optional[RegistryProtocol] = None,
 ) -> dict[str, Any]:
     """
     Convenience wrapper for single-file ingestion.
@@ -1067,18 +891,10 @@ def ingest_file(
 def ingest_batch(
     file_paths: list[str | Path],
     document_type: DocumentType = DocumentType.RESUME,
-    vector_store: Optional[
-        VectorStoreProtocol
-    ] = None,
-    hybrid_indexer: Optional[
-        HybridIndexerProtocol
-    ] = None,
-    registry: Optional[
-        RegistryProtocol
-    ] = None,
-    progress_callback: Optional[
-        Callable[[int, int, dict[str, Any]], None]
-    ] = None,
+    vector_store: Optional[VectorStoreProtocol] = None,
+    hybrid_indexer: Optional[HybridIndexerProtocol] = None,
+    registry: Optional[RegistryProtocol] = None,
+    progress_callback: Optional[Callable[[int, int, dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
     """
     Convenience wrapper for batch ingestion.

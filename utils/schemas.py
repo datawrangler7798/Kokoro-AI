@@ -44,14 +44,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_validator,
-    model_validator,
-)
-
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ============================================================
 # ENUMS
@@ -314,8 +307,7 @@ class Document(KokoroBaseModel):
     sections: dict[str, str] = Field(
         default_factory=dict,
         description=(
-            "Section name → section text mapping "
-            "created by section-aware parsing."
+            "Section name → section text mapping " "created by section-aware parsing."
         ),
     )
 
@@ -333,9 +325,7 @@ class Document(KokoroBaseModel):
         value = value.strip()
 
         if not value:
-            raise ValueError(
-                "Document text cannot be empty."
-            )
+            raise ValueError("Document text cannot be empty.")
 
         return value
 
@@ -428,13 +418,8 @@ class DocumentChunk(KokoroBaseModel):
         total_chunks is available.
         """
 
-        if (
-            self.total_chunks is not None
-            and self.chunk_index >= self.total_chunks
-        ):
-            raise ValueError(
-                "chunk_index must be smaller than total_chunks."
-            )
+        if self.total_chunks is not None and self.chunk_index >= self.total_chunks:
+            raise ValueError("chunk_index must be smaller than total_chunks.")
 
         return self
 
@@ -502,8 +487,7 @@ class SearchFilters(KokoroBaseModel):
         if (
             self.minimum_experience is not None
             and self.maximum_experience is not None
-            and self.maximum_experience
-            < self.minimum_experience
+            and self.maximum_experience < self.minimum_experience
         ):
             raise ValueError(
                 "maximum_experience must be greater than "
@@ -599,8 +583,7 @@ class QueryPlan(KokoroBaseModel):
     reasoning: str | None = Field(
         default=None,
         description=(
-            "Short explanation of why the router selected "
-            "this execution plan."
+            "Short explanation of why the router selected " "this execution plan."
         ),
     )
 
@@ -617,11 +600,7 @@ class QueryPlan(KokoroBaseModel):
         Remove blank subqueries/expanded queries.
         """
 
-        return [
-            query.strip()
-            for query in values
-            if query and query.strip()
-        ]
+        return [query.strip() for query in values if query and query.strip()]
 
     @model_validator(mode="after")
     def validate_query_plan(self):
@@ -630,18 +609,11 @@ class QueryPlan(KokoroBaseModel):
         """
 
         if self.should_decompose and not self.sub_queries:
-            raise ValueError(
-                "sub_queries are required when "
-                "should_decompose=True."
-            )
+            raise ValueError("sub_queries are required when " "should_decompose=True.")
 
-        if (
-            self.should_expand_query
-            and not self.expanded_queries
-        ):
+        if self.should_expand_query and not self.expanded_queries:
             raise ValueError(
-                "expanded_queries are required when "
-                "should_expand_query=True."
+                "expanded_queries are required when " "should_expand_query=True."
             )
 
         return self
@@ -791,9 +763,7 @@ class RetrievalResponse(KokoroBaseModel):
 
     retrieval_method: RetrievalMethod
 
-    results: list[
-        RetrievalResult | HybridResult
-    ] = Field(
+    results: list[RetrievalResult | HybridResult] = Field(
         default_factory=list,
     )
 
@@ -914,11 +884,7 @@ class RerankResult(KokoroBaseModel):
         Normalize list values.
         """
 
-        return [
-            value.strip()
-            for value in values
-            if value and value.strip()
-        ]
+        return [value.strip() for value in values if value and value.strip()]
 
 
 # ============================================================
@@ -1107,9 +1073,7 @@ class PromptContext(KokoroBaseModel):
         default_factory=list,
     )
 
-    retrieved_results: list[
-        RetrievalResult | HybridResult
-    ] = Field(
+    retrieved_results: list[RetrievalResult | HybridResult] = Field(
         default_factory=list,
     )
 
@@ -1172,14 +1136,10 @@ class GuardrailResult(KokoroBaseModel):
         """
 
         if self.status == GuardrailStatus.PASSED and not self.passed:
-            raise ValueError(
-                "Guardrail status PASSED requires passed=True."
-            )
+            raise ValueError("Guardrail status PASSED requires passed=True.")
 
         if self.status == GuardrailStatus.BLOCKED and self.passed:
-            raise ValueError(
-                "Guardrail status BLOCKED requires passed=False."
-            )
+            raise ValueError("Guardrail status BLOCKED requires passed=False.")
 
         return self
 
@@ -1211,14 +1171,10 @@ class OutputValidationResult(KokoroBaseModel):
         """
 
         if self.status == ValidationStatus.VALID and not self.valid:
-            raise ValueError(
-                "VALID status requires valid=True."
-            )
+            raise ValueError("VALID status requires valid=True.")
 
         if self.status == ValidationStatus.INVALID and self.valid:
-            raise ValueError(
-                "INVALID status requires valid=False."
-            )
+            raise ValueError("INVALID status requires valid=False.")
 
         return self
 
@@ -1380,39 +1336,29 @@ class BatchIngestionResult(KokoroBaseModel):
 
         if self.total_files != len(self.results):
             raise ValueError(
-                "total_files must match the number of "
-                "ingestion results."
+                "total_files must match the number of " "ingestion results."
             )
 
         calculated_success = sum(
-            result.status == IngestionStatus.COMPLETED
-            for result in self.results
+            result.status == IngestionStatus.COMPLETED for result in self.results
         )
 
         calculated_skipped = sum(
-            result.status == IngestionStatus.SKIPPED
-            for result in self.results
+            result.status == IngestionStatus.SKIPPED for result in self.results
         )
 
         calculated_failed = sum(
-            result.status == IngestionStatus.FAILED
-            for result in self.results
+            result.status == IngestionStatus.FAILED for result in self.results
         )
 
         if self.successful_files != calculated_success:
-            raise ValueError(
-                "successful_files does not match ingestion results."
-            )
+            raise ValueError("successful_files does not match ingestion results.")
 
         if self.skipped_files != calculated_skipped:
-            raise ValueError(
-                "skipped_files does not match ingestion results."
-            )
+            raise ValueError("skipped_files does not match ingestion results.")
 
         if self.failed_files != calculated_failed:
-            raise ValueError(
-                "failed_files does not match ingestion results."
-            )
+            raise ValueError("failed_files does not match ingestion results.")
 
         return self
 
@@ -1643,15 +1589,11 @@ class EvaluationResult(KokoroBaseModel):
         default_factory=list,
     )
 
-    retrieval_results: list[
-        RetrievalEvaluationResult
-    ] = Field(
+    retrieval_results: list[RetrievalEvaluationResult] = Field(
         default_factory=list,
     )
 
-    ragas_results: list[
-        RagasEvaluationResult
-    ] = Field(
+    ragas_results: list[RagasEvaluationResult] = Field(
         default_factory=list,
     )
 
@@ -1672,9 +1614,7 @@ class EvaluationResult(KokoroBaseModel):
         """
 
         if any(value <= 0 for value in values):
-            raise ValueError(
-                "Evaluation K values must be greater than 0."
-            )
+            raise ValueError("Evaluation K values must be greater than 0.")
 
         return sorted(set(values))
 
@@ -1716,9 +1656,7 @@ class CacheEntry(KokoroBaseModel):
         """
 
         if self.expires_at <= self.created_at:
-            raise ValueError(
-                "expires_at must be after created_at."
-            )
+            raise ValueError("expires_at must be after created_at.")
 
         return self
 
@@ -1876,9 +1814,7 @@ class SearchRequest(KokoroBaseModel):
         value = value.strip()
 
         if not value:
-            raise ValueError(
-                "Query cannot be empty."
-            )
+            raise ValueError("Query cannot be empty.")
 
         return value
 
