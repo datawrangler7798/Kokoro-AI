@@ -18,7 +18,7 @@ Architecture
               +--------+--------+
               |                 |
               v                 v
-          Pinecone             BM25
+       Pinecone dense      Pinecone sparse
           Semantic            Keyword
           Search              Search
               |                 |
@@ -74,6 +74,15 @@ class SemanticRetriever(Protocol):
     """
 
     def similarity_search(
+        self,
+        query: str,
+        *,
+        top_k: int | None = None,
+        filters: Any | None = None,
+    ) -> list[RetrievalResult]:
+        ...
+
+    def keyword_search(
         self,
         query: str,
         *,
@@ -919,8 +928,9 @@ class BM25Backend:
 
 class HybridIndexer:
     """
-    Combines Pinecone semantic retrieval and BM25 lexical
-    retrieval.
+    Combines Pinecone dense retrieval and Pinecone sparse
+    keyword retrieval. The local BM25 backend remains as a
+    compatibility fallback for alternate retrievers.
 
     Default fusion:
 
@@ -1252,7 +1262,7 @@ class HybridIndexer:
             RetrievalResult
         ],
         keyword_results: Sequence[
-            tuple[BM25Record, float]
+            Any
         ],
         *,
         top_k: int,
@@ -1309,16 +1319,22 @@ class HybridIndexer:
             float,
         ] = {}
 
-        keyword_objects: dict[
-            str,
-            BM25Record,
-        ] = {}
+        keyword_objects: dict[str, Any] = {}
 
-        for record, score in keyword_results:
+        for item in keyword_results:
+            # Pinecone sparse retrieval returns RetrievalResult objects;
+            # the legacy in-process BM25 backend returns (record, score).
+            if isinstance(item, tuple) and len(item) == 2:
+                record, score = item
+            else:
+                record = item
+                score = self._extract_value(record, "score", 0.0)
 
             chunk_id = str(
-                record.chunk_id
+                self._extract_value(record, "chunk_id", "")
             )
+            if not chunk_id:
+                continue
 
             keyword_scores[
                 chunk_id
@@ -1444,13 +1460,23 @@ class HybridIndexer:
 
                 if not content:
                     content = (
-                        keyword_record.text
+                        self._extract_value(
+                            keyword_record, "text", ""
+                        )
+                        or self._extract_value(
+                            keyword_record, "content", ""
+                        )
                     )
 
-                # Semantic metadata remains primary.
-                # BM25 fills in anything missing.
+                # Semantic metadata remains primary; sparse results
+                # fill in any fields missing from that result.
                 for key, value in (
-                    keyword_record.metadata.items()
+                    (
+                        self._extract_value(
+                            keyword_record, "metadata", {}
+                        )
+                        or {}
+                    ).items()
                 ):
                     metadata.setdefault(
                         key,
@@ -1592,13 +1618,23 @@ class HybridIndexer:
         # Keyword retrieval
         # ----------------------------------------------------
 
-        keyword_results = (
-            self.bm25.search(
+        pinecone_keyword_search = getattr(
+            self.semantic_retriever, "keyword_search", None
+        )
+        if callable(pinecone_keyword_search):
+            keyword_results = pinecone_keyword_search(
+                query,
+                top_k=keyword_k,
+                filters=filters,
+            )
+        else:
+            # Retain compatibility with test doubles and alternate semantic
+            # retrievers that do not provide Pinecone sparse search.
+            keyword_results = self.bm25.search(
                 query,
                 top_k=keyword_k,
                 filters=filter_mapping,
             )
-        )
 
         # ----------------------------------------------------
         # Fusion

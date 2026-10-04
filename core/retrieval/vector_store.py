@@ -71,7 +71,8 @@ class VectorIndex(Protocol):
     def query(
         self,
         *,
-        vector: Sequence[float],
+        vector: Sequence[float] | None = None,
+        sparse_vector: Mapping[str, Sequence[Any]] | None = None,
         top_k: int,
         namespace: str = "",
         filter: Mapping[str, Any] | None = None,
@@ -112,6 +113,7 @@ class VectorRecord:
     vector_id: str
     values: list[float]
     metadata: dict[str, Any]
+    sparse_values: dict[str, list[Any]]
 
 
 @dataclass(slots=True)
@@ -389,7 +391,6 @@ class PineconeVectorStore:
             index_name
             or settings.PINECONE_INDEX_NAME
         )
-
         self.namespace = (
             namespace
             if namespace is not None
@@ -486,51 +487,68 @@ class PineconeVectorStore:
                     names.add(name)
 
         if self.index_name in names:
-            logger.info(
-                "Pinecone index already exists: %s",
-                self.index_name,
-            )
+            describe_index = getattr(self.pinecone_client, "describe_index", None)
+            if callable(describe_index):
+                description = describe_index(self.index_name)
+                metric = self._get_value(description, "metric")
+                dimension = self._get_value(description, "dimension")
+                if metric and metric != "dotproduct":
+                    raise RuntimeError(
+                        f"Pinecone index {self.index_name!r} uses metric {metric!r}; "
+                        "single-index dense+sparse hybrid search requires dotproduct. "
+                        "Delete and recreate it with the updated configuration."
+                    )
+                if dimension and int(dimension) != settings.PINECONE_DIMENSION:
+                    raise RuntimeError(
+                        f"Pinecone index {self.index_name!r} has dimension {dimension}; "
+                        f"expected {settings.PINECONE_DIMENSION}. Delete and recreate it."
+                    )
+            self._index = self.pinecone_client.Index(self.index_name)
+            logger.info("Pinecone hybrid index already exists: %s", self.index_name)
             return
 
-        try:
-            from pinecone import ServerlessSpec
-        except ImportError as exc:
+        create_for_model = getattr(
+            self.pinecone_client, "create_index_for_model", None
+        )
+        if not callable(create_for_model):
             raise RuntimeError(
-                "pinecone package is required."
-            ) from exc
-
-        cloud = getattr(
-            settings,
-            "PINECONE_CLOUD",
-            "aws",
-        )
-
-        region = getattr(
-            settings,
-            "PINECONE_REGION",
-            "us-east-1",
-        )
-
-        self.pinecone_client.create_index(
-            name=self.index_name,
-            dimension=settings.PINECONE_DIMENSION,
-            metric=settings.PINECONE_METRIC,
-            spec=ServerlessSpec(
-                cloud=cloud,
-                region=region,
-            ),
-        )
-
-        logger.info(
-            "Created Pinecone index: %s",
-            self.index_name,
-        )
-
-        self._index = (
-            self.pinecone_client.Index(
-                self.index_name
+                "The installed pinecone SDK must support create_index_for_model "
+                "for the hybrid index's text field map."
             )
+        create_for_model(
+            name=self.index_name,
+            cloud=getattr(settings, "PINECONE_CLOUD", "aws"),
+            region=getattr(settings, "PINECONE_REGION", "us-east-1"),
+            embed={
+                "model": settings.PINECONE_DENSE_EMBEDDING_MODEL,
+                "field_map": {"text": "text"},
+                "dimension": settings.PINECONE_DIMENSION,
+                "metric": "dotproduct",
+                "write_parameters": {"input_type": "passage"},
+                "read_parameters": {"input_type": "query"},
+            },
         )
+        logger.info(
+            "Created Pinecone hybrid index: %s | dense=%s | sparse=%s "
+            "| metric=dotproduct | field_map=text:text",
+            self.index_name,
+            settings.PINECONE_DENSE_EMBEDDING_MODEL,
+            settings.PINECONE_SPARSE_EMBEDDING_MODEL,
+        )
+        self._index = self.pinecone_client.Index(self.index_name)
+
+    def index_exists(self) -> bool:
+        """Check for an index without creating it (used by search and startup)."""
+        if self._index is not None:
+            return True
+        existing_indexes = self.pinecone_client.list_indexes()
+        if hasattr(existing_indexes, "names"):
+            return self.index_name in set(existing_indexes.names())
+        for item in existing_indexes or []:
+            name = item.get("name") if isinstance(item, Mapping) else getattr(item, "name", None)
+            if name == self.index_name:
+                return True
+        return False
 
     # --------------------------------------------------------
     # Metadata
@@ -648,6 +666,7 @@ class PineconeVectorStore:
         cls,
         chunk: Any,
         vector: Sequence[float],
+        sparse_vector: Mapping[str, Sequence[Any]],
     ) -> VectorRecord:
         """
         Convert a DocumentChunk/Pydantic model/dict into an
@@ -724,7 +743,76 @@ class PineconeVectorStore:
             metadata=cls._clean_metadata(
                 metadata
             ),
+            sparse_values={
+                "indices": list(sparse_vector.get("indices", [])),
+                "values": [float(value) for value in sparse_vector.get("values", [])],
+            },
         )
+
+    def _embed_hybrid_texts(
+        self,
+        texts: Sequence[str],
+        *,
+        input_type: str,
+    ) -> list[tuple[list[float], dict[str, list[Any]]]]:
+        """Generate Pinecone-hosted dense and sparse embeddings in matched batches."""
+        if not texts:
+            return []
+        inference = getattr(self.pinecone_client, "inference", None)
+        embed = getattr(inference, "embed", None)
+        if not callable(embed):
+            raise RuntimeError(
+                "The installed pinecone SDK must support hosted inference.embed "
+                "for dense+sparse hybrid vectors."
+            )
+
+        embedded: list[tuple[list[float], dict[str, list[Any]]]] = []
+        inference_batch_size = 96
+        for start in range(0, len(texts), inference_batch_size):
+            batch = list(texts[start : start + inference_batch_size])
+            dense_response = embed(
+                model=settings.PINECONE_DENSE_EMBEDDING_MODEL,
+                inputs=batch,
+                parameters={
+                    "input_type": input_type,
+                    "truncate": "END",
+                    "dimension": settings.PINECONE_DIMENSION,
+                },
+            )
+            sparse_response = embed(
+                model=settings.PINECONE_SPARSE_EMBEDDING_MODEL,
+                inputs=batch,
+                parameters={
+                    "input_type": input_type,
+                    "truncate": "END",
+                },
+            )
+            dense_items = self._get_value(dense_response, "data", []) or []
+            sparse_items = self._get_value(sparse_response, "data", []) or []
+            if len(dense_items) != len(batch) or len(sparse_items) != len(batch):
+                raise RuntimeError("Pinecone embedding count does not match input count.")
+
+            for dense, sparse in zip(dense_items, sparse_items):
+                dense_values = self._get_value(dense, "values", []) or []
+                sparse_indices = self._get_value(sparse, "sparse_indices", []) or []
+                sparse_values = self._get_value(sparse, "sparse_values", []) or []
+                if len(dense_values) != settings.PINECONE_DIMENSION:
+                    raise ValueError(
+                        "Pinecone dense embedding dimension mismatch: "
+                        f"expected {settings.PINECONE_DIMENSION}, got {len(dense_values)}."
+                    )
+                if not sparse_indices or len(sparse_indices) != len(sparse_values):
+                    raise ValueError("Pinecone returned an invalid sparse embedding.")
+                embedded.append(
+                    (
+                        [float(value) for value in dense_values],
+                        {
+                            "indices": [int(value) for value in sparse_indices],
+                            "values": [float(value) for value in sparse_values],
+                        },
+                    )
+                )
+        return embedded
 
     # --------------------------------------------------------
     # Upsert
@@ -781,11 +869,7 @@ class PineconeVectorStore:
             len(texts),
         )
 
-        embeddings = (
-            self.embedding_provider.embed_documents(
-                texts
-            )
-        )
+        embeddings = self._embed_hybrid_texts(texts, input_type="passage")
 
         if len(embeddings) != len(chunks):
             raise RuntimeError(
@@ -796,8 +880,9 @@ class PineconeVectorStore:
             self._chunk_to_record(
                 chunk,
                 vector,
+                sparse_vector,
             )
-            for chunk, vector in zip(
+            for chunk, (vector, sparse_vector) in zip(
                 chunks,
                 embeddings,
             )
@@ -818,6 +903,7 @@ class PineconeVectorStore:
                 {
                     "id": record.vector_id,
                     "values": record.values,
+                    "sparse_values": record.sparse_values,
                     "metadata": record.metadata,
                 }
                 for record in batch
@@ -913,6 +999,10 @@ class PineconeVectorStore:
                 value,
                 (list, tuple, set),
             ):
+                # SearchFilters uses empty lists as defaults. Sending an
+                # empty $in constraint makes Pinecone reject every record.
+                if not value:
+                    continue
                 pinecone_filter[field] = {
                     "$in": list(value)
                 }
@@ -1167,8 +1257,10 @@ class PineconeVectorStore:
                 "top_k must be greater than zero."
             )
 
-        # Ensure the configured Pinecone index exists before querying.
-        self.ensure_index()
+        # Searching must not create an empty index; ingestion creates it on demand.
+        if not self.index_exists():
+            logger.info("Pinecone index is not created yet; skipping search | index=%s", self.index_name)
+            return []
 
         query_chunks = RecursiveCharacterTextSplitter(
             chunk_size=settings.CHUNK_SIZE,
@@ -1178,16 +1270,9 @@ class PineconeVectorStore:
         if not query_chunks:
             return []
 
-        batch_embed = getattr(self.embedding_provider, "embed_queries", None)
-        if callable(batch_embed):
-            query_vectors = batch_embed(query_chunks)
-        else:
-            query_vectors = [
-                self.embedding_provider.embed_query(chunk)
-                for chunk in query_chunks
-            ]
-        if len(query_vectors) != len(query_chunks):
-            raise RuntimeError("Query chunk and embedding counts do not match.")
+        query_vectors = [
+            dense for dense, _ in self._embed_hybrid_texts(query_chunks, input_type="query")
+        ]
 
         pinecone_filter = (
             self._build_filter(
@@ -1240,6 +1325,40 @@ class PineconeVectorStore:
         )
 
         return results
+
+    def keyword_search(
+        self,
+        query: str,
+        *,
+        top_k: int | None = None,
+        filters: Any | None = None,
+    ) -> list[RetrievalResult]:
+        """Search the same index using Pinecone's hosted sparse embedder."""
+        if not query or not query.strip():
+            return []
+        k = top_k if top_k is not None else settings.BM25_TOP_K
+        if k <= 0:
+            raise ValueError("top_k must be greater than zero.")
+        if not self.index_exists():
+            logger.info("Pinecone index is not created yet; skipping sparse search | index=%s", self.index_name)
+            return []
+        sparse = self._embed_hybrid_texts([query.strip()], input_type="query")[0][1]
+        response = self.index.query(
+            # Pinecone's hybrid indexes use dense vector_type indexes with
+            # sparse vectors attached. The query API requires a dense vector
+            # even when this retrieval leg should score only sparse matches.
+            # A zero vector contributes 0 to dotproduct while preserving the
+            # sparse score for the existing dense/sparse fusion step.
+            vector=[0.0] * settings.PINECONE_DIMENSION,
+            sparse_vector=sparse,
+            top_k=k,
+            namespace=self.namespace,
+            filter=self._build_filter(filters),
+            include_metadata=True,
+            include_values=False,
+        )
+        return [self._build_retrieval_result(match).model_copy(update={"retrieval_method": RetrievalMethod.SPARSE, "rank": rank})
+                for rank, match in enumerate(self._parse_matches(response), start=1)]
 
     # --------------------------------------------------------
     # Deletion
@@ -1333,6 +1452,8 @@ class PineconeVectorStore:
 
     def stats(self) -> Any:
         """Return Pinecone index statistics."""
+        if not self.index_exists():
+            return {"namespaces": {}, "total_vector_count": 0}
 
         # Pinecone's current Index API does not accept namespace here;
         # namespace counts are included in the returned stats mapping.

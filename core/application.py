@@ -96,7 +96,7 @@ class KokoroApplication:
         return result
 
     def _backfill_bm25_from_resumes(self, resume_paths: list[Path]) -> int:
-        """Build a missing lexical index without embedding or upserting vectors."""
+        """Build missing lexical indexes without regenerating dense embeddings."""
 
         chunks_to_index: list[Any] = []
         for path in resume_paths:
@@ -154,6 +154,19 @@ class KokoroApplication:
                 "total_chunks": 0,
                 "results": [],
             }
+
+        # The local registry can outlive a manually deleted Pinecone index.
+        # In that case, existing PDFs would otherwise be treated as duplicates
+        # and skipped forever, so clear the stale markers and rebuild the
+        # configured index from the local document folders.
+        if resume_paths and not self.vector_store.index_exists():
+            logger.warning(
+                "Pinecone index is missing | rebuilding from local documents | index=%s resumes=%d",
+                self.vector_store.index_name,
+                len(resume_paths),
+            )
+            self.registry.clear()
+
         batches = []
         completed = 0
         total = len(resume_paths) + len(jd_paths)
@@ -181,9 +194,8 @@ class KokoroApplication:
                 )
             )
 
-        # Existing vectors are skipped by the document registry. If the local
-        # BM25 corpus is absent (for example, when upgrading from dense-only
-        # retrieval), rebuild only the lexical index from local PDFs.
+        # Rebuild the local BM25 corpus if needed. Pinecone dense and sparse
+        # vectors are stored together by the normal ingestion path.
         if resume_paths and self.hybrid_indexer.bm25_size() == 0:
             self._backfill_bm25_from_resumes(resume_paths)
 
@@ -200,7 +212,12 @@ class KokoroApplication:
             # The registry is local bookkeeping. If it says documents exist
             # but the configured Pinecone namespace is empty, rebuild vectors
             # from the local PDFs instead of silently keeping search empty.
-            if resume_paths and pinecone_count == 0 and indexed_or_skipped_files:
+            if (
+                resume_paths
+                and self.vector_store.index_exists()
+                and pinecone_count == 0
+                and indexed_or_skipped_files
+            ):
                 logger.warning(
                     "Registry/Pinecone mismatch detected | indexed_or_skipped=%d skipped=%d namespace=%r; reindexing local PDFs",
                     indexed_or_skipped_files,

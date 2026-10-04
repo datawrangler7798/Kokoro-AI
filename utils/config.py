@@ -98,11 +98,15 @@ class Settings(BaseSettings):
     # PINECONE
     # ============================================================
 
-    PINECONE_INDEX_NAME: str = "Kokoro"
+    PINECONE_INDEX_NAME: str = "hireflow"
+
+    # Hybrid vectors are stored together in the configured Pinecone index.
+    PINECONE_DENSE_EMBEDDING_MODEL: str = "llama-text-embed-v2"
+    PINECONE_SPARSE_EMBEDDING_MODEL: str = "pinecone-sparse-english-v0"
 
     PINECONE_DIMENSION: int = 768
 
-    PINECONE_METRIC: str = "cosine"
+    PINECONE_METRIC: str = "dotproduct"
 
     # ============================================================
     # RETRIEVAL
