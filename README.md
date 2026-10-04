@@ -14,6 +14,8 @@ Kokoro AI is a recruiter assistant that searches a local library of PDF resumes.
 
 The root `app.py` loads the recruiter interface in `streamlit/app.py`. `main.py` provides separate configuration and startup checks; it is not the Streamlit entry point.
 
+For Community Cloud deployments, commit the synthetic sample PDFs under `data/resumes/`; the app uses those local files for candidate resume preview and download.
+
 ## How resume indexing works
 
 When the Streamlit app starts, it creates the application services and starts a background indexer. The indexer scans `data/resumes/` and `data/jds/` for PDFs. Existing files are checked on each app start; matching file hashes in `data/index/document_registry.json` let ingestion skip documents that were already indexed.
