@@ -1,6 +1,6 @@
 # Kokoro AI
 
-Kokoro AI is a recruiter assistant that searches a local library of PDF resumes. It combines semantic and keyword search, ranks candidate matches, and lets recruiters review the original resume.
+A RAG-based recruiting assistant that searches PDF resumes to find candidates matching skills, experience, and role requirements.
 
 ## Start the app
 
