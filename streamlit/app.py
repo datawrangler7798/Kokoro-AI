@@ -46,7 +46,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import importlib.util
 import json
+import os
 import re
+import tempfile
 import threading
 import time
 import unicodedata
@@ -214,12 +216,25 @@ def create_session_id(existing_ids: list[str] | None = None) -> str:
                 ) from exc
 
         next_number = max([last_number, *existing_numbers], default=0) + 1
-        temporary_path = SESSION_COUNTER_PATH.with_suffix(".json.tmp")
-        temporary_path.write_text(
-            json.dumps({"last_session_number": next_number}),
-            encoding="utf-8",
-        )
-        temporary_path.replace(SESSION_COUNTER_PATH)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=SESSION_COUNTER_PATH.parent,
+                prefix=".session_counter.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+                json.dump(
+                    {"last_session_number": next_number},
+                    temporary_file,
+                )
+            os.replace(temporary_path, SESSION_COUNTER_PATH)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
 
     return f"KK{next_number:05d}"
 
