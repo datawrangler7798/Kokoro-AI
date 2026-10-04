@@ -44,9 +44,11 @@ if str(PROJECT_ROOT) not in sys.path:
 # ============================================================
 
 import json
+import importlib.util
 import re
 import threading
 import time
+import unicodedata
 from html import escape
 from typing import Any
 
@@ -125,6 +127,59 @@ def looks_like_job_description(message: str) -> bool:
         len(message.strip()) >= 180
         and any(heading in normalized for heading in jd_headings)
     )
+
+
+def clean_recruiter_input(message: str) -> str:
+    """Normalize recruiter text without changing its meaning."""
+    normalized = unicodedata.normalize("NFKC", message or "")
+    normalized = "".join(
+        character
+        for character in normalized
+        if character in "\n\t"
+        or unicodedata.category(character) not in {"Cc", "Cf", "Cs"}
+    )
+    lines = [" ".join(line.split()) for line in normalized.splitlines()]
+    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+    cleaned = re.sub(
+        r"\b(\d+(?:\.\d+)?)\s*(\+)?\s*(?:yrs?|years?)\b",
+        lambda match: f"{match.group(1)}{match.group(2) or ''} years",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\bexp\.?\b", "experience", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def candidate_resume_paths(candidate: dict[str, Any]) -> list[Path]:
+    """Resolve indexed resume filenames inside the configured resume folder."""
+    resume_root = Path(settings.RESUME_DIRECTORY)
+    if not resume_root.is_absolute():
+        resume_root = PROJECT_ROOT / resume_root
+    resume_root = resume_root.resolve()
+
+    source_names = list(candidate.get("source_documents", []))
+    if not source_names:
+        # Older chat history predates source_documents. Match its stable
+        # candidate ID to resume filenames so saved results still get a link.
+        candidate_token = re.sub(
+            r"[^a-z0-9]", "", str(candidate.get("candidate_id", "")).lower()
+        )
+        if candidate_token and not candidate_token.startswith("candidate"):
+            source_names = [
+                path.name
+                for path in resume_root.glob("*.pdf")
+                if re.sub(r"[^a-z0-9]", "", path.stem.lower()).startswith(candidate_token)
+            ]
+
+    paths: list[Path] = []
+    for source_name in source_names:
+        filename = Path(str(source_name)).name
+        if not filename.lower().endswith(".pdf"):
+            continue
+        path = (resume_root / filename).resolve()
+        if path.parent == resume_root and path.is_file():
+            paths.append(path)
+    return sorted(set(paths))
 
 
 def create_session_id(existing_ids: list[str] | None = None) -> str:
@@ -571,11 +626,6 @@ def render_chat_history() -> None:
                 st.markdown(content)
             if role == "assistant":
                 render_candidate_cards(message.get("candidates", []))
-                evidence = message.get("evidence", [])
-                if evidence:
-                    with st.expander("Evidence"):
-                        for item in evidence:
-                            st.markdown(f"- {item}")
 
 
 def render_job_description_status() -> None:
@@ -700,24 +750,36 @@ def render_response_metadata(
 
 def render_candidate_cards(candidates: list[Any]) -> None:
     has_fit_assessment = any(candidate.get("score_breakdown") for candidate in candidates)
-    if candidates and any(candidate.get("score_breakdown") for candidate in candidates):
+    if candidates and has_fit_assessment:
         with st.expander("How the JD fit score is calculated"):
             st.caption("Evidence-based fit guidance, not a probability of hiring.")
             st.write("Role relevance 30% · Skills match 35% · Experience 20% · Domain relevance 10% · Evidence strength 5%.")
     elif candidates and not has_fit_assessment:
-        st.caption("These are keyword-supported resume matches; Gemini fit scoring is temporarily unavailable.")
+        st.caption("Showing search relevance scores. These reflect query similarity, not a hiring probability.")
 
-    for candidate in candidates:
+    for index, candidate in enumerate(candidates, start=1):
         with st.container(border=True):
-            st.subheader(candidate.get("candidate_name") or candidate.get("candidate_id", "Candidate"))
-            if candidate.get("profile_summary"):
-                st.write(candidate["profile_summary"])
+            title_col, score_col = st.columns([4, 1], vertical_alignment="center")
+            with title_col:
+                st.caption(f"CANDIDATE {index:02d}")
+                candidate_name = candidate.get("candidate_name") or candidate.get("candidate_id", "Candidate")
+                st.markdown(f"### {escape(str(candidate_name))}")
             score = candidate.get("match_score")
             if score is not None:
-                st.metric("JD fit score", f"{score:.0%}")
+                score = max(0.0, min(1.0, float(score)))
+                score_label = "Job fit" if candidate.get("score_breakdown") else "Search match"
+                with score_col:
+                    st.markdown(f"**{score:.0%}**")
+                    st.caption(score_label)
+                st.progress(score)
+            elif "candidate_id" in candidate:
+                with score_col:
+                    st.caption(f"ID {candidate['candidate_id']}")
+            if candidate.get("profile_summary"):
+                st.write(candidate["profile_summary"])
             recommendation = candidate.get("recommendation")
             if recommendation:
-                st.markdown(f"**Recruiter suggestion:** {recommendation}")
+                st.markdown(f"**Recruiter suggestion:** {escape(str(recommendation))}")
 
             score_breakdown = candidate.get("score_breakdown") or {}
             if score_breakdown:
@@ -729,28 +791,72 @@ def render_candidate_cards(candidates: list[Any]) -> None:
                         "domain_relevance": "Domain relevance",
                         "evidence_strength": "Evidence strength",
                     }
-                    breakdown_rows = [
-                        {"Dimension": label, "Score": f"{score_breakdown[key]:.0f}%"}
-                        for key, label in labels.items()
-                        if score_breakdown.get(key) is not None
-                    ]
-                    st.dataframe(breakdown_rows, hide_index=True, width="stretch")
+                    breakdown_rows = []
+                    for key, label in labels.items():
+                        value = score_breakdown.get(key)
+                        if value is not None:
+                            value = value.get("score") if isinstance(value, dict) else value
+                            if value is not None:
+                                breakdown_rows.append({"Dimension": label, "Score": f"{float(value):.0f}%"})
+                    if breakdown_rows:
+                        st.dataframe(breakdown_rows, hide_index=True, width="stretch")
 
             if has_fit_assessment:
                 left, right = st.columns(2)
                 with left:
                     st.markdown("**Advantages**")
-                    st.write("\n".join(f"- {item}" for item in candidate.get("advantages", [])) or ", ".join(candidate.get("matched_skills", [])) or "No clear strengths found in the retrieved evidence.")
+                    st.write("\n".join(f"- {item}" for item in candidate.get("advantages", [])) or ", ".join(candidate.get("matched_skills", [])) or "No specific strengths identified.")
                 with right:
                     st.markdown("**Gaps to clarify**")
-                    st.write("\n".join(f"- {item}" for item in candidate.get("gaps", [])) or ", ".join(candidate.get("missing_skills", [])) or "No major gaps identified in the retrieved evidence.")
+                    st.write("\n".join(f"- {item}" for item in candidate.get("gaps", [])) or ", ".join(candidate.get("missing_skills", [])) or "No major gaps identified.")
             if candidate.get("explanation"):
                 st.write(candidate["explanation"])
-            evidence = candidate.get("evidence", [])
-            if evidence:
-                with st.expander("View evidence"):
-                    for item in evidence:
-                        st.markdown(f"- {item}")
+
+            resume_paths = candidate_resume_paths(candidate)
+            if resume_paths:
+                resume_key = str(candidate.get("candidate_id") or candidate.get("rank") or "candidate")
+                resume_panel = st.expander(
+                    "View resume",
+                    icon=":material/description:",
+                    key=f"resume-panel-{resume_key}",
+                    on_change="rerun",
+                )
+                if resume_panel.open:
+                    with resume_panel:
+                        selected_resume = resume_paths[0]
+                        if len(resume_paths) > 1:
+                            selected_name = st.selectbox(
+                                "Resume file",
+                                [path.name for path in resume_paths],
+                                key=f"resume-choice-{resume_key}",
+                            )
+                            selected_resume = next(
+                                path for path in resume_paths if path.name == selected_name
+                            )
+
+                        if (
+                            hasattr(st, "pdf")
+                            and importlib.util.find_spec("streamlit_pdf") is not None
+                        ):
+                            st.pdf(
+                                selected_resume,
+                                height=680,
+                                key=f"resume-viewer-{resume_key}",
+                            )
+                        else:
+                            st.caption("Download the PDF to review the full resume.")
+
+                        st.download_button(
+                            "Download resume",
+                            data=selected_resume.read_bytes(),
+                            file_name=selected_resume.name,
+                            mime="application/pdf",
+                            icon=":material/download:",
+                            key=f"resume-download-{resume_key}",
+                            on_click="ignore",
+                        )
+            else:
+                st.caption("Resume PDF is not available in the local resume folder.")
 
 
 # ============================================================
@@ -813,16 +919,10 @@ def process_pending_search() -> None:
                 candidate.model_dump()
                 for candidate in response.candidates
             ])
-            render_response_metadata(response)
-            if response.evidence:
-                with st.expander("Evidence"):
-                    for item in response.evidence:
-                        st.markdown(f"- {item}")
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": answer,
                 "candidates": [item.model_dump() for item in response.candidates],
-                "evidence": response.evidence,
                 "response_metadata": {
                     "query_plan": response.query_plan.model_dump() if response.query_plan else None,
                     "retrieved_chunk_ids": response.retrieved_chunk_ids,
@@ -848,15 +948,22 @@ def render_chat_input() -> None:
         message.get("role") == "user"
         for message in st.session_state.messages
     )
+    if not chat_started:
+        st.caption(
+            "For focused matches, include the role, key skills, years of experience, "
+            "and location. Example: Accountant with 5+ years’ experience and QuickBooks."
+        )
     query = st.chat_input(
-        "Type a recruiting request to start..."
+        "Describe the role, skills, and experience you need..."
         if not chat_started
-        else "Ask about candidates, skills, or paste a job description..."
+        else "Search or refine by role, skills, experience, or location..."
     )
-    if not query or not query.strip():
+    if not query:
         return
 
-    query = query.strip()
+    query = clean_recruiter_input(query)
+    if not query:
+        return
     if is_greeting(query):
         st.session_state.messages.append({"role": "user", "content": query})
         greeting_reply = (

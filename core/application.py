@@ -278,28 +278,18 @@ class KokoroApplication:
         reranked: list[Any],
         service_notice: str | None = None,
     ) -> str:
-        """Format retrieved candidates into a useful answer without an LLM call."""
+        """Summarize fallback results without displaying resume excerpts."""
 
         if not reranked:
             return "I found resume matches, but couldn’t summarize them right now. Please try again shortly."
 
-        lines = [service_notice or "Here are the closest candidates found in the resume library:"]
+        lines = [
+            service_notice
+            or f"Found {len(reranked)} candidate matches. Their match scores are shown below."
+        ]
         for index, candidate in enumerate(reranked[:5], start=1):
             name = candidate.candidate_name or candidate.candidate_id
-            lines.append(f"\n{index}. **{name}** (Candidate ID: {candidate.candidate_id})")
-            if candidate.explanation:
-                lines.append(candidate.explanation)
-            for evidence in candidate.evidence[:2]:
-                lines.append(f"- {evidence}")
-        if (
-            not service_notice
-            and reranked
-            and all(not candidate.explanation for candidate in reranked)
-        ):
-            lines[0] = (
-                "Gemini’s fit review is unavailable right now. Here are the "
-                "closest keyword matches, with supporting resume evidence:"
-            )
+            lines.append(f"{index}. **{name}**")
         return "\n".join(lines)
 
     def answer(self, query: str, session_id: str) -> KokoroResponse:
@@ -437,7 +427,9 @@ class KokoroApplication:
                 candidate_id=item.candidate_id,
                 candidate_name=item.candidate_name,
                 profile_summary=item.profile_summary,
-                match_score=item.match_score if item.explanation else None,
+                # Gemini provides a requirement-based fit score when
+                # available; the fallback score is hybrid search relevance.
+                match_score=item.match_score,
                 score_breakdown=item.score_breakdown if item.explanation else None,
                 matched_skills=item.matched_skills,
                 missing_skills=item.missing_skills,
@@ -448,6 +440,23 @@ class KokoroApplication:
                 explanation=item.explanation,
                 evidence=item.evidence,
                 source_chunk_ids=item.source_chunk_ids,
+                source_documents=sorted(
+                    {
+                        Path(
+                            result.source_file
+                            or result.metadata.get("source_file")
+                            or result.metadata.get("source")
+                        ).name
+                        for result in retrieved
+                        if (result.candidate_id or result.metadata.get("candidate_id"))
+                        == item.candidate_id
+                        and (
+                            result.source_file
+                            or result.metadata.get("source_file")
+                            or result.metadata.get("source")
+                        )
+                    }
+                ),
                 rank=item.rank,
             )
             for item in reranked

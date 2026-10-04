@@ -66,7 +66,7 @@ class Settings(BaseSettings):
 
     LLM_TEMPERATURE: float = 0.0
 
-    LLM_MAX_OUTPUT_TOKENS: int = 2048
+    LLM_MAX_OUTPUT_TOKENS: int = 4096
 
     # Maximum LLM requests allowed per minute.
     LLM_REQUESTS_PER_MINUTE: int = 5

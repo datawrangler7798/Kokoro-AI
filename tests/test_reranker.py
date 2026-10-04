@@ -2,11 +2,13 @@
 
 import json
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from core.retrieval.re_ranker import GeminiReranker
+from utils.config import settings
 from utils.schemas import DocumentType, RetrievalMethod, RetrievalResult
 
 
@@ -181,7 +183,37 @@ def test_gemini_outage_fallback_does_not_claim_a_fit_score():
     fallback = reranker.rerank("Python engineer", [make_result(score=0.80)])
     assert len(fallback) == 1
     assert fallback[0].explanation is None
-    assert "temporarily unavailable" in fallback.service_notice
+    assert "could not complete candidate fit scoring" in fallback.service_notice
+
+
+def test_gemini_request_uses_constrained_json_output(monkeypatch):
+    reranker = make_reranker()
+    response = SimpleNamespace(text='{"results": []}')
+    client = SimpleNamespace(
+        models=SimpleNamespace(generate_content=MagicMock(return_value=response))
+    )
+    reranker._client = client
+    acquire = MagicMock()
+    monkeypatch.setattr(
+        "core.retrieval.re_ranker.get_llm_rate_limiter",
+        lambda: SimpleNamespace(acquire=acquire),
+    )
+
+    assert reranker._call_gemini("test prompt") == response.text
+    config = client.models.generate_content.call_args.kwargs["config"]
+    assert config["response_mime_type"] == "application/json"
+    assert config["response_schema"]["required"] == ["results"]
+    assert config["max_output_tokens"] == max(settings.LLM_MAX_OUTPUT_TOKENS, 4096)
+    acquire.assert_called_once_with()
+
+
+def test_gemini_auth_failure_has_actionable_fallback_notice():
+    reranker = make_reranker()
+    reranker._call_gemini = MagicMock(
+        side_effect=RuntimeError("API_KEY_INVALID: invalid API key")
+    )
+    fallback = reranker.rerank("Python engineer", [make_result(score=0.80)])
+    assert "Check GOOGLE_API_KEY" in fallback.service_notice
 
 
 def test_gemini_quota_exhaustion_is_exposed_to_the_application():

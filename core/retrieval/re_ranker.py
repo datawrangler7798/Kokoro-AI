@@ -99,6 +99,70 @@ class RerankResults(list[RerankResult]):
 
 MAX_RERANK_RESULTS = 5
 
+_RERANK_RESULT_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "candidate_id": {"type": "STRING"},
+        "candidate_name": {"type": "STRING"},
+        "profile_summary": {"type": "STRING"},
+        "fit_scores": {
+            "type": "OBJECT",
+            "properties": {
+                key: {"type": "NUMBER"}
+                for key in (
+                    "role_relevance",
+                    "skills_match",
+                    "experience_match",
+                    "domain_relevance",
+                    "evidence_strength",
+                )
+            },
+            "required": [
+                "role_relevance",
+                "skills_match",
+                "experience_match",
+                "domain_relevance",
+                "evidence_strength",
+            ],
+        },
+        "matched_skills": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "missing_skills": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "advantages": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "gaps": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "recommendation": {"type": "STRING"},
+        "experience_match": {"type": "STRING"},
+        "explanation": {"type": "STRING"},
+        "evidence": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "source_chunk_ids": {"type": "ARRAY", "items": {"type": "STRING"}},
+    },
+    "required": [
+        "candidate_id",
+        "candidate_name",
+        "profile_summary",
+        "fit_scores",
+        "matched_skills",
+        "missing_skills",
+        "advantages",
+        "gaps",
+        "recommendation",
+        "experience_match",
+        "explanation",
+        "evidence",
+        "source_chunk_ids",
+    ],
+}
+
+_RERANK_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "results": {
+            "type": "ARRAY",
+            "items": _RERANK_RESULT_SCHEMA,
+        }
+    },
+    "required": ["results"],
+}
+
 
 # ============================================================
 # RERANKER
@@ -314,38 +378,9 @@ IMPORTANT RULES
     supplied evidence.
 13. source_chunk_ids must contain only supplied chunk IDs.
 
-Return ONLY valid JSON.
-
-Expected structure:
-
-{{
-    "results": [
-        {{
-            "candidate_id": "candidate_id",
-            "candidate_name": "Candidate Name",
-            "profile_summary": "Brief evidence-based resume profile",
-            "fit_scores": {{
-                "role_relevance": 0,
-                "skills_match": 0,
-                "experience_match": 0,
-                "domain_relevance": 0,
-                "evidence_strength": 0
-            }},
-            "matched_skills": [],
-            "missing_skills": [],
-            "advantages": [],
-            "gaps": [],
-            "recommendation": "",
-            "experience_match": "Evidence-based experience assessment",
-            "explanation": "Evidence-based explanation.",
-            "evidence": [
-                "Evidence-supported statement."
-            ],
-            "source_chunk_ids": [],
-            "rank": 1
-        }}
-    ]
-}}
+Return only the JSON object required by the response schema. Include a result
+only for each meaningful candidate match. Do not include a rank; the
+application assigns ranks after validation.
 
 Do not return markdown.
 Do not return additional fields.
@@ -954,6 +989,13 @@ The application calculates the final score with these weights: role relevance 30
             self._client.models.generate_content(
                 model=self.model,
                 contents=prompt,
+                config={
+                    "temperature": settings.LLM_TEMPERATURE,
+                    # Five detailed candidate objects can exceed the old 2k cap.
+                    "max_output_tokens": max(settings.LLM_MAX_OUTPUT_TOKENS, 4096),
+                    "response_mime_type": "application/json",
+                    "response_schema": _RERANK_RESPONSE_SCHEMA,
+                },
             )
         )
 
@@ -1129,11 +1171,33 @@ The application calculates the final score with these weights: role relevance 30
                 "Gemini API rate limit reached. I can still show keyword-matched "
                 "resumes, but AI fit scoring and recommendations are temporarily unavailable."
             )
+        elif any(marker in error_text for marker in ("API_KEY_INVALID", "UNAUTHENTICATED", "401")):
+            notice = (
+                "Gemini authentication failed. Check GOOGLE_API_KEY in your .env file. "
+                "Keyword-matched resumes are still shown without AI fit scoring."
+            )
+        elif any(marker in error_text for marker in ("PERMISSION_DENIED", "403")):
+            notice = (
+                "Gemini access was denied. Check that this API key can use the Gemini API. "
+                "Keyword-matched resumes are still shown without AI fit scoring."
+            )
+        elif any(marker in error_text for marker in ("NOT_FOUND", "404")):
+            notice = (
+                f"The configured Gemini model ({self.model}) is unavailable to this API key. "
+                "Check LLM_MODEL and the models enabled for your Gemini project. "
+                "Keyword-matched resumes are still shown."
+            )
+        elif isinstance(last_error, ValueError):
+            notice = (
+                "Gemini returned an incomplete candidate assessment. I can still show "
+                "keyword-matched resumes, but AI fit scoring and recommendations "
+                "were skipped for this search."
+            )
         else:
             notice = (
-                "Gemini is temporarily unavailable or returned an unusable response. "
-                "Any results shown are "
-                "keyword matches without AI scoring or recommendations."
+                "Gemini could not complete candidate fit scoring for this search. "
+                "I can still show keyword-matched resumes without AI recommendations. "
+                "Check the application log for the provider error."
             )
         return RerankResults(fallback, service_notice=notice)
 
