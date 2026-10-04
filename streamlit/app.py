@@ -853,11 +853,11 @@ def render_candidate_cards(candidates: list[Any]) -> None:
 
             resume_paths = candidate_resume_paths(candidate)
             if resume_paths:
-                resume_key = str(
-                    candidate.get("candidate_id")
-                    or candidate.get("rank")
-                    or "candidate"
-                )
+                # A search response can contain the same candidate more than
+                # once (for example, when results from multiple sub-queries
+                # are merged). Include the card position so every widget key
+                # stays unique while remaining stable across reruns.
+                resume_key = f"{index}-{candidate.get('candidate_id') or candidate.get('rank') or 'candidate'}"
                 resume_panel = st.expander(
                     "View resume",
                     icon=":material/description:",
